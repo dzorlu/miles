@@ -2,7 +2,6 @@
 HF weight iterator API."""
 
 import json
-import logging
 import math
 import os
 from abc import abstractmethod
@@ -18,10 +17,9 @@ from miles.backends.training_utils.weight_update.hf_weight_iterator import HfWei
 from miles.backends.training_utils.weight_update.hf_weight_iterator.atomic_groups import get_hf_atomic_update_groups
 from miles.backends.training_utils.weight_update.hf_weight_iterator.checkpoint_towers import (
     iter_checkpoint_tower_units,
+    mm_tower_names,
 )
 from miles.utils.lora.utils import is_lora_weight_name
-
-logger = logging.getLogger(__name__)
 
 
 class MegatronHfWeightIteratorBase(HfWeightIteratorBase):
@@ -139,6 +137,7 @@ def _gather_pp_full_adapter(
 
 
 def _iter_mm_tower_units(args, *, materialize):
-    if "inkling_mm_model_provider" not in (args.custom_model_provider_path or ""):
+    towers = mm_tower_names(args)
+    if not towers:
         return
-    yield from iter_checkpoint_tower_units(args.hf_checkpoint, materialize=materialize)
+    yield from iter_checkpoint_tower_units(args.hf_checkpoint, materialize=materialize, towers=towers)
