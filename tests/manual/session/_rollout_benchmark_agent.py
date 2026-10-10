@@ -1,5 +1,6 @@
 """Mock agent process and hooks for the full CPU rollout benchmark."""
 
+import logging
 import os
 from contextlib import asynccontextmanager
 
@@ -48,6 +49,8 @@ def serve_agent(request_bodies, port):
             response = await app.state.client.post(
                 base_url + "/v1/chat/completions", content=body, headers={"content-type": "application/json"}
             )
+            if not response.is_success:
+                logging.error("Session request failed (%s): %s", response.status_code, response.text)
             response.raise_for_status()
         return {"agent_metrics": {"turns_ok": len(request_bodies)}}
 
