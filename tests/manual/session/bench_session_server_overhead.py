@@ -34,10 +34,15 @@ import math
 import multiprocessing
 import os
 import statistics
+import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
+# Direct execution and spawn children need the repository root for tests.manual imports.
+if not __package__:
+    sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 # No miles imports at module level, deliberately: multiprocessing "spawn"
 # children (the load generators and the mock backend) re-import this script as
