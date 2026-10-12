@@ -488,3 +488,28 @@ def test_sleep_and_wake_leave_cpu_offloaded_training_state_on_the_host(monkeypat
     actor.wake_up()
 
     assert moved == ([] if cpu_offload else [True, False])
+
+
+def test_the_trainer_hands_image_inputs_only_to_a_forward_that_takes_them():
+    pytest.importorskip("torchtitan")
+    from miles.backends.torchtitan_utils.trainer import TitanTrainer
+
+    class _VisionModel(torch.nn.Module):
+        def forward(self, tokens, positions=None, pixel_values=None, image_grid_thw=None):
+            return tokens
+
+    class _TextModel(torch.nn.Module):
+        def forward(self, tokens, positions=None):
+            return tokens
+
+    def _trainer(model):
+        trainer = TitanTrainer.__new__(TitanTrainer)
+        trainer.model_parts = [model]
+        return trainer
+
+    images = {"pixel_values": torch.zeros(4, 3), "image_grid_thw": torch.tensor([[1, 2, 2]])}
+    handed = _trainer(_VisionModel())._image_inputs({"multimodal_train_inputs": images})
+    assert handed.keys() == images.keys() and all(handed[k] is images[k] for k in images)
+    assert _trainer(_VisionModel())._image_inputs({"multimodal_train_inputs": None}) == {}
+    with pytest.raises(ValueError, match=r"\['image_grid_thw', 'pixel_values'\].*_TextModel"):
+        _trainer(_TextModel())._image_inputs({"multimodal_train_inputs": images})
