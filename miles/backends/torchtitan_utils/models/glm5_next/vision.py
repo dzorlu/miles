@@ -27,6 +27,14 @@ class Glm5NextImageEncoder:
             raise RuntimeError(f"{self._hf_checkpoint} has no image processor to rebuild PNG images with")
         return processor.image_processor
 
+    @torch.no_grad()
+    def encode(self, inputs: ImageInputs, images: list[int]) -> torch.Tensor:
+        pixel_values = select_pixel_values(inputs, images, lambda: self.image_processor)
+        grid_thw = inputs.grid_thw[images]
+        return self.visual(
+            pixel_values.to(device=self._device, dtype=self._dtype), grid_thw=grid_thw.to(self._device)
+        ).pooler_output
+
 
 def _sglang_glm5_next_processor(hf_checkpoint: str):
     """SGLang's GLM-5.3 processor, the one the rollout engine runs.
@@ -42,11 +50,3 @@ def _sglang_glm5_next_processor(hf_checkpoint: str):
     except ImportError:
         return None
     return Glm5NextProcessor.from_pretrained(hf_checkpoint, trust_remote_code=True)
-
-    @torch.no_grad()
-    def encode(self, inputs: ImageInputs, images: list[int]) -> torch.Tensor:
-        pixel_values = select_pixel_values(inputs, images, lambda: self.image_processor)
-        grid_thw = inputs.grid_thw[images]
-        return self.visual(
-            pixel_values.to(device=self._device, dtype=self._dtype), grid_thw=grid_thw.to(self._device)
-        ).pooler_output
