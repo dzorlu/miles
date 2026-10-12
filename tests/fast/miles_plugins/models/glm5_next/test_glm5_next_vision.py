@@ -67,6 +67,7 @@ def test_png_rebuild_falls_back_to_the_engine_processor(monkeypatch):
     module = types.ModuleType("sglang.srt.configs.glm5_next_processing")
     module.Glm5NextProcessor = FakeProcessor
     monkeypatch.setitem(sys.modules, "sglang.srt.configs.glm5_next_processing", module)
+    assert callable(getattr(titan_vision.Glm5NextImageEncoder, "encode", None))
     monkeypatch.setattr(titan_vision, "load_processor", lambda *args, **kwargs: None)
     encoder = titan_vision.Glm5NextImageEncoder.__new__(titan_vision.Glm5NextImageEncoder)
     encoder._hf_checkpoint = "/ckpt"
