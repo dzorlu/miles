@@ -804,3 +804,20 @@ class TestParserBinding:
             "glm45",
             "glm47",
         )
+
+
+def test_qwen38small_family_resolves_its_fixed_template_and_carries_images():
+    import os
+
+    from miles.utils.chat_template_utils.tito_tokenizer import (
+        Qwen38SmallTITOTokenizer,
+        TITOTokenizerType,
+        resolve_fixed_chat_template,
+    )
+
+    assert TITOTokenizerType.get_tokenizer_class(TITOTokenizerType("qwen38small")) is Qwen38SmallTITOTokenizer
+    path, kwargs = resolve_fixed_chat_template("qwen38small")
+    assert path is not None and os.path.isfile(path) and path.endswith("qwen3.8_small_and_flash_next_fixed.jinja")
+    assert kwargs == {"preserve_thinking": True}
+    assert Qwen38SmallTITOTokenizer.image_pad_token == "<|image_pad|>"
+    assert Qwen38SmallTITOTokenizer.tool_call_parser == "qwen3_coder"

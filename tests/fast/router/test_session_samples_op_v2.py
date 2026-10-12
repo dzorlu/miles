@@ -64,19 +64,17 @@ class _UnusedBackend:
         raise AssertionError("collect_samples must not touch the proxy backend")
 
 
-def _build_core(use_addition_r3: bool = False) -> SessionCoreV2:
+def _build_core(use_addition_r3: bool = False, args: SimpleNamespace = _ARGS) -> SessionCoreV2:
     # Mirrors setup_session_routes (sessions.py): tokenizer + registry + core.
-    tokenizer = load_tokenizer(
-        _ARGS.hf_checkpoint, chat_template_path=_ARGS.chat_template_path, trust_remote_code=True
-    )
+    tokenizer = load_tokenizer(args.hf_checkpoint, chat_template_path=args.chat_template_path, trust_remote_code=True)
     tito_tokenizer = get_tito_tokenizer(
         tokenizer,
-        tokenizer_type=_ARGS.tito_model,
-        chat_template_kwargs=_ARGS.apply_chat_template_kwargs,
+        tokenizer_type=args.tito_model,
+        chat_template_kwargs=args.apply_chat_template_kwargs,
     )
-    registry = SessionRegistryV2(_ARGS, tokenizer, tito_tokenizer=tito_tokenizer)
+    registry = SessionRegistryV2(args, tokenizer, tito_tokenizer=tito_tokenizer)
     return SessionCoreV2(
-        _UnusedBackend(), registry, _ARGS, _ARGS.session_server_instance_id, use_addition_r3=use_addition_r3
+        _UnusedBackend(), registry, _ARGS, args.session_server_instance_id, use_addition_r3=use_addition_r3
     )
 
 
@@ -88,6 +86,14 @@ def core():
 @pytest.fixture(scope="module")
 def addition_core():
     return _build_core(use_addition_r3=True)
+
+
+@pytest.fixture(scope="module")
+def same_prompt_core():
+    args = SimpleNamespace(
+        **{**vars(_ARGS), "session_sample_picker_path": "miles.rollout.session.v2.picker_hub.drop_same_prompt_retries"}
+    )
+    return _build_core(args=args)
 
 
 # ── fixtures: a two-turn trajectory with R3 / cache stats / weight versions ──
@@ -460,6 +466,44 @@ async def test_superseded_retry_leaf_is_trimmed(core):
     reply = decode_samples_and_merge_input_sample(payload, Sample(), fields=COMPUTED_FIELDS_V2)
     (m,) = reply.samples
     assert m.tokens == [1, 2, 3, 10, 11, 21, 31]
+
+
+@pytest.mark.parametrize(
+    ("resent_env_token", "expected_leaf_names"),
+    [(20, ["later"]), (21, ["later", "earlier"])],
+    ids=["identical-resend-trimmed", "different-request-kept-as-branch"],
+)
+async def test_same_prompt_picker_trims_only_identical_resends(
+    same_prompt_core, resent_env_token, expected_leaf_names
+):
+    """drop_same_prompt_retries supersedes a leaf only when the later sibling re-sent its exact
+    prompt; a sibling with a different request (a folded screenshot) is a branch and both leaves stay."""
+    sid, state = await _fresh_state(same_prompt_core)
+    root = _fabricate_node(
+        state, None, _single_turn_record([1, 2, 3], [10, 11]), [1, 2, 3, 10, 11], completion_span=(3, 5)
+    )
+    leaves = {
+        "earlier": _fabricate_node(
+            state,
+            root,
+            _single_turn_record([1, 2, 3, 10, 11, 20], [30]),
+            [1, 2, 3, 10, 11, 20, 30],
+            completion_span=(6, 7),
+        ),
+        "later": _fabricate_node(
+            state,
+            root,
+            _single_turn_record([1, 2, 3, 10, 11, resent_env_token], [31]),
+            [1, 2, 3, 10, 11, resent_env_token, 31],
+            completion_span=(6, 7),
+        ),
+    }
+    state.active_leaf = leaves["later"]
+
+    status, payload = await _collect_via_op(same_prompt_core, sid)
+    assert status == 200
+    reply = decode_samples_and_merge_input_sample(payload, Sample(), fields=COMPUTED_FIELDS_V2)
+    assert [sample.tokens for sample in reply.samples] == [leaves[name].token_ids for name in expected_leaf_names]
 
 
 @pytest.mark.parametrize("trajectory_reward", [1.0, 0.0])

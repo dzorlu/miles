@@ -8,5 +8,7 @@ samples (drop or reorder, never rewrite). Public inputs are each sample's
 """
 
 from miles.rollout.session.v2.picker_hub.drop_retries import drop_retries
+from miles.rollout.session.v2.picker_hub.drop_rolled_back_leaves import drop_rolled_back_leaves
+from miles.rollout.session.v2.picker_hub.drop_same_prompt_retries import drop_same_prompt_retries
 
-__all__ = ["drop_retries"]
+__all__ = ["drop_retries", "drop_rolled_back_leaves", "drop_same_prompt_retries"]

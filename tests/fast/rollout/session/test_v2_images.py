@@ -37,7 +37,7 @@ def _args():
         sglang_speculative_algorithm=None,
         session_server_instance_id=uuid.uuid4().hex,
         save_debug_trajectory_data=None,
-        session_sample_picker_path="miles.rollout.session.v2.picker_hub.drop_retries",
+        session_sample_picker_path="miles.rollout.session.v2.picker_hub.drop_same_prompt_retries",
         session_sample_postprocessor_path="miles.rollout.session.v2.postprocessor_hub.default_postprocess",
         num_layers=None,
         moe_router_topk=None,
