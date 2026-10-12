@@ -411,7 +411,36 @@ def split_train_data_by_dp_raw(args, data: dict[str, Any], *, dp_size: int) -> l
     if adapter_slots is not None:
         partitions = [sorted(p, key=lambda i: adapter_slots[i]) for p in partitions]
 
-    return _package_shards(args, data, partitions)
+    shards = _package_shards(args, data, partitions)
+    num_rollouts = _rollouts_per_step(args, data)
+    if num_rollouts is not None:
+        for shard in shards:
+            shard["num_rollouts"] = num_rollouts
+    return shards
+
+
+def _rollouts_per_step(args, data: dict[str, Any]) -> list[int] | None:
+    """The rollout count the loss and the metrics divide by, for a batch whose
+    rollouts hold several samples (compaction, subagents, folded episodes).
+
+    The rollout-side schedule stamps ``num_rollouts`` itself; this split did
+    not, so the trainer fell back to the global batch size, the sample count
+    under ``--use-dynamic-global-batch-size``. The per-sample means already
+    sum to one mean per rollout (``rollout_mask_sums``), so dividing by
+    samples scaled the loss and every per-token metric by rollouts / samples.
+    One step per rollout is the only shape this split knows the count for;
+    a batch of one sample per rollout keeps the fallback (equal numbers)."""
+    rollout_ids = data.get("rollout_ids")
+    if rollout_ids is None:
+        return None
+    num_samples = len(data["tokens"])
+    num_rollouts = len(set(rollout_ids))
+    if num_rollouts == num_samples:
+        return None
+    global_batch_size = data.get("dynamic_global_batch_size", args.global_batch_size)
+    if global_batch_size != num_samples:
+        return None
+    return [num_rollouts]
 
 
 def _package_shards(args, data: dict[str, Any], partitions) -> list[dict[str, Any]]:
