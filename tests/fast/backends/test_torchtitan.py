@@ -513,3 +513,12 @@ def test_the_trainer_hands_image_inputs_only_to_a_forward_that_takes_them():
     assert _trainer(_VisionModel())._image_inputs({"multimodal_train_inputs": None}) == {}
     with pytest.raises(ValueError, match=r"\['image_grid_thw', 'pixel_values'\].*_TextModel"):
         _trainer(_TextModel())._image_inputs({"multimodal_train_inputs": images})
+
+
+def test_flags_that_need_full_logits_are_rejected_under_context_parallelism():
+    validate_torchtitan_args(_args(context_parallel_size=2))
+    validate_torchtitan_args(_args(use_sampling_support_replay=True))
+    with pytest.raises(ValueError, match="--use-sampling-support-replay, --loss-type score_centering"):
+        validate_torchtitan_args(
+            _args(context_parallel_size=2, use_sampling_support_replay=True, loss_type="score_centering")
+        )
