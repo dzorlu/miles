@@ -122,3 +122,11 @@ def test_train_inputs_pack_the_pngs_with_lengths_and_grids():
     assert packed["image_png_lengths"].tolist() == [len(first), len(second)]
     assert packed["image_grid_thw"].tolist() == [[1, 4, 4], [1, 4, 8]]
     assert train_inputs([])["image_grid_thw"].shape == (0, 3)
+
+
+def test_unreadable_bytes_and_bad_base64_are_client_errors():
+    store = MediaStore(FakeProcessor(), PAD)
+    with pytest.raises(ValueError, match="not a readable image"):
+        store.register("data:image/png;base64," + base64.b64encode(b"not an image at all").decode())
+    with pytest.raises(ValueError, match="not valid base64"):
+        store.register("data:image/png;base64,@@@not-base64@@@")

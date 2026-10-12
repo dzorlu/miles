@@ -24,6 +24,7 @@ from them.
 from __future__ import annotations
 
 import base64
+import binascii
 import hashlib
 import io
 from copy import deepcopy
@@ -56,15 +57,22 @@ def _decode_data_url(url: str) -> tuple[str, bytes]:
     header, _, payload = url.partition(",")
     if ";base64" not in header:
         raise ValueError("session image data URLs must be base64")
-    return header[len("data:") : header.index(";")], base64.b64decode(payload)
+    try:
+        return header[len("data:") : header.index(";")], base64.b64decode(payload, validate=True)
+    except (binascii.Error, ValueError) as e:
+        raise ValueError(f"session image data URL is not valid base64: {e}") from e
 
 
 def _as_png(media_type: str, data: bytes) -> tuple[bytes, Any]:
-    """The image as PNG bytes and as a PIL image; a non-PNG is re-encoded."""
+    """The image as PNG bytes and as a PIL image; a non-PNG is re-encoded.
+    Bytes PIL cannot read are a client error (ValueError), not a server one."""
     from PIL import Image
 
-    image = Image.open(io.BytesIO(data))
-    image.load()
+    try:
+        image = Image.open(io.BytesIO(data))
+        image.load()
+    except (OSError, ValueError, SyntaxError) as e:  # UnidentifiedImageError is an OSError
+        raise ValueError(f"session image bytes are not a readable image: {e}") from e
     if media_type == "image/png":
         return data, image
     buffer = io.BytesIO()
