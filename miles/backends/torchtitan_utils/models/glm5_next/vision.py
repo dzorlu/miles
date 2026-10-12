@@ -22,8 +22,26 @@ class Glm5NextImageEncoder:
         """Loaded on the first PNG microbatch; runs that ship pixel tensors never need it."""
         processor = load_processor(self._hf_checkpoint, trust_remote_code=True)
         if processor is None or getattr(processor, "image_processor", None) is None:
+            processor = _sglang_glm5_next_processor(self._hf_checkpoint)
+        if processor is None or getattr(processor, "image_processor", None) is None:
             raise RuntimeError(f"{self._hf_checkpoint} has no image processor to rebuild PNG images with")
         return processor.image_processor
+
+
+def _sglang_glm5_next_processor(hf_checkpoint: str):
+    """SGLang's GLM-5.3 processor, the one the rollout engine runs.
+
+    Transformers releases without a native GLM-5.3 processor (5.12.1, the
+    pin of the torchtitan image) make AutoProcessor return a bare tokenizer
+    for this checkpoint, which load_processor discards. Rebuilding with the
+    engine's own processor keeps training pixels equal to rollout pixels.
+    None when this SGLang does not ship it.
+    """
+    try:
+        from sglang.srt.configs.glm5_next_processing import Glm5NextProcessor
+    except ImportError:
+        return None
+    return Glm5NextProcessor.from_pretrained(hf_checkpoint, trust_remote_code=True)
 
     @torch.no_grad()
     def encode(self, inputs: ImageInputs, images: list[int]) -> torch.Tensor:
