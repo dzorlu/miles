@@ -23,6 +23,7 @@ from miles.rollout.session.errors import (
     UpstreamResponseError,
 )
 from miles.rollout.session.linear_trajectory import SessionRegistry
+from miles.rollout.session.media import MediaStore, media_references, normalize_messages, restore_messages
 from miles.rollout.session.samples.codec import encode_samples
 from miles.rollout.session.samples.merge import (
     compute_samples_from_openai_records,
@@ -241,6 +242,38 @@ def extract_completion(result: dict) -> tuple:
     return response, choice, assistant_message, completion_token_ids
 
 
+def store_request_media(request_body: dict, media: MediaStore | None) -> dict:
+    """Register the request's images in the session's store and reference
+    them from the messages as ``mm://`` URLs (miles.rollout.session.media),
+    so stored history and records carry each image once. A text-only server
+    (``media`` None) passes the request through; an image on it is a 400."""
+    messages = request_body.get("messages")
+    if not isinstance(messages, list):
+        return request_body
+    if media is None:
+        if media_references(messages):
+            raise MessageValidationError("this session server carries no images (no image processor)")
+        return request_body
+    try:
+        normalized = normalize_messages(messages, media)
+    except ValueError as e:
+        raise MessageValidationError(str(e)) from e
+    if normalized is messages:
+        return request_body
+    return {**request_body, "messages": normalized}
+
+
+def engine_request_body(request_body: dict, media: MediaStore | None) -> bytes:
+    """The proxied body: the stored ``mm://`` references become the client's
+    data URLs again, so the engine receives the images with the ids."""
+    if media is None:
+        return json.dumps(request_body).encode()
+    messages = request_body.get("messages")
+    if isinstance(messages, list) and media_references(messages):
+        request_body = {**request_body, "messages": restore_messages(messages, media)}
+    return json.dumps(request_body).encode()
+
+
 class SessionCore:
     """HTTP session operations over one ``SessionRegistry``."""
 
@@ -326,6 +359,7 @@ class SessionCore:
                 accumulated_token_ids=metadata.get("accumulated_token_ids"),
                 max_trim_tokens=metadata.get("max_trim_tokens", 0),
                 use_addition_r3=self.use_addition_r3,
+                media=session.media,
             )
             if max_seq_len is not None:
                 samples = truncate_samples_by_total_tokens(samples, max_seq_len, tokenizer)
@@ -375,6 +409,7 @@ class SessionCore:
             request_body, client_stream, tito_tokenizer = prepare_chat_request(
                 body, self.args, self.registry.tito_tokenizer
             )
+            request_body = store_request_media(request_body, session.media)
 
             request_messages = request_body.get("messages", [])
             prompt_token_ids = session.prepare_pretokenized(
@@ -390,7 +425,7 @@ class SessionCore:
             # the checkpoint this request builds on.
             self._maybe_request_addition_r3(request_body, session.token_ids, prompt_token_ids)
 
-            proxy_body = json.dumps(request_body).encode()
+            proxy_body = engine_request_body(request_body, session.media)
             expected_num_assistant = session.num_assistant
         # --- lock released ---
 

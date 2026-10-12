@@ -1,4 +1,3 @@
-import json
 import logging
 import time
 
@@ -11,9 +10,11 @@ from miles.rollout.session.core import (
     _chat_client_response,
     _render_json,
     _samples_response,
+    engine_request_body,
     extract_completion,
     prepare_chat_request,
     proxy_result_to_response,
+    store_request_media,
 )
 from miles.rollout.session.errors import SessionNotFoundError, TokenizationError
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS_V2, encode_samples
@@ -149,6 +150,7 @@ class SessionCoreV2(SessionCore):
             request_body, client_stream, tito_tokenizer = prepare_chat_request(
                 body, self.args, self.registry.tito_tokenizer
             )
+            request_body = store_request_media(request_body, session.media)
 
             request_messages = request_body.get("messages", [])
             position_for_request(session, request_messages, message_matcher=self.registry.message_matcher)
@@ -163,7 +165,7 @@ class SessionCoreV2(SessionCore):
 
             self._maybe_request_addition_r3(request_body, session.active_token_ids(), prompt_token_ids)
 
-            proxy_body = json.dumps(request_body).encode()
+            proxy_body = engine_request_body(request_body, session.media)
             attach_parent = session.active_leaf
         # --- lock released ---
 

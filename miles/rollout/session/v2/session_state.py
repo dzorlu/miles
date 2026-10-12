@@ -19,6 +19,7 @@ from typing import Any
 
 from miles.rollout.session.errors import MessageValidationError, TokenizationError, TruncatedGenerationError
 from miles.rollout.session.linear_trajectory import SessionRegistry, assert_pretokenized_prefix
+from miles.rollout.session.media import MediaStore
 from miles.rollout.session.types import SessionRecord
 from miles.rollout.session.v2.tree_trajectory import SessionTree, TrajectoryNode
 from miles.utils.chat_template_utils.message_matcher_hub import SessionMessageMatcher
@@ -41,6 +42,8 @@ class SessionStateV2:
     closing: bool = field(default=False, repr=False, compare=False)
     tree: SessionTree = field(default_factory=SessionTree)
     active_leaf: TrajectoryNode | None = None
+    # The session's images (miles.rollout.session.media); None on a text-only server.
+    media: MediaStore | None = field(default=None, repr=False, compare=False)
 
     def active_path(self) -> list[TrajectoryNode]:
         return self.active_leaf.path_nodes() if self.active_leaf is not None else []
@@ -186,7 +189,7 @@ class SessionRegistryV2(SessionRegistry):
 
     def create_session(self) -> str:
         session_id = uuid.uuid4().hex
-        self.sessions[session_id] = SessionStateV2()
+        self.sessions[session_id] = SessionStateV2(media=self.new_media_store())
         return session_id
 
     def compute_mismatch(self, messages: list[dict[str, Any]], token_ids: list[int], tools: Any) -> list[dict] | None:

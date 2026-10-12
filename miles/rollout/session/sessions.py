@@ -18,7 +18,7 @@ from miles.utils.chat_template_utils.message_matcher_hub import (
     SessionMessageMatcherError,
     resolve_session_message_matcher,
 )
-from miles.utils.processing_utils import load_tokenizer
+from miles.utils.processing_utils import load_processor, load_tokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -45,15 +45,29 @@ def setup_session_routes(app, backend, args, *, use_addition_r3: bool = False):
         chat_template_kwargs=getattr(args, "apply_chat_template_kwargs", None),
     )
 
+    # The image processor of a vision model (None for a text model): the
+    # sessions count and grid their images with it (miles.rollout.session.media).
+    processor = load_processor(hf_checkpoint, trust_remote_code=True)
+    if processor is not None and tito_tokenizer.image_pad_id() is None:
+        logger.info(
+            "[session] %s has an image processor but TITO family %r has no image placeholder; images are refused",
+            hf_checkpoint,
+            getattr(args, "tito_model", "default"),
+        )
+
     use_v2 = getattr(args, "use_session_server", None) == "v2"
     if use_v2:
         from miles.rollout.session.v2.core import SessionCoreV2
         from miles.rollout.session.v2.session_state import SessionRegistryV2
 
-        registry = SessionRegistryV2(args, tokenizer, tito_tokenizer=tito_tokenizer, message_matcher=message_matcher)
+        registry = SessionRegistryV2(
+            args, tokenizer, tito_tokenizer=tito_tokenizer, message_matcher=message_matcher, processor=processor
+        )
         core = SessionCoreV2(backend, registry, args, session_server_instance_id, use_addition_r3=use_addition_r3)
     else:
-        registry = SessionRegistry(args, tokenizer, tito_tokenizer=tito_tokenizer, message_matcher=message_matcher)
+        registry = SessionRegistry(
+            args, tokenizer, tito_tokenizer=tito_tokenizer, message_matcher=message_matcher, processor=processor
+        )
         core = SessionCore(backend, registry, args, session_server_instance_id, use_addition_r3=use_addition_r3)
 
     @app.exception_handler(SessionError)

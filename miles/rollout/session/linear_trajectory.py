@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from miles.rollout.session.errors import MessageValidationError, SessionNotFoundError, TokenizationError
+from miles.rollout.session.media import MediaStore
 from miles.rollout.session.types import SessionRecord
 from miles.utils.chat_template_utils.message_matcher_hub import (
     SessionMessageMatcher,
@@ -77,6 +78,9 @@ class LinearTrajectory:
     trajectory_token_ids: list[list[int]] = field(default_factory=list)
     generated_checkpoint_message_ends: list[int] = field(default_factory=list)
     num_assistant: int = 0
+    # The session's images (miles.rollout.session.media): stored messages and
+    # records reference them as ``mm://`` URLs; None on a text-only server.
+    media: MediaStore | None = field(default=None, repr=False, compare=False)
 
     @property
     def token_ids(self) -> list[int]:
@@ -301,11 +305,15 @@ class SessionRegistry:
         *,
         tito_tokenizer: TITOTokenizer,
         message_matcher: SessionMessageMatcher | None = None,
+        processor: Any = None,
     ):
         self.sessions: dict[str, LinearTrajectory] = {}
         self.args = args
         self.tokenizer = tokenizer
         self.tito_tokenizer = tito_tokenizer
+        # The model's image processor (None for a text-only model): every
+        # session's MediaStore counts and grids its images with it.
+        self.processor = processor
         self.comparator = tito_tokenizer.create_comparator()
         self.message_matcher: SessionMessageMatcher = (
             message_matcher if message_matcher is not None else strict_message_matches
@@ -313,8 +321,12 @@ class SessionRegistry:
 
     def create_session(self) -> str:
         session_id = uuid.uuid4().hex
-        self.sessions[session_id] = LinearTrajectory()
+        self.sessions[session_id] = LinearTrajectory(media=self.new_media_store())
         return session_id
+
+    def new_media_store(self) -> MediaStore:
+        pad_lookup = getattr(self.tito_tokenizer, "image_pad_id", None)
+        return MediaStore(self.processor, pad_lookup() if callable(pad_lookup) else None)
 
     def get_session(self, session_id: str) -> LinearTrajectory:
         session = self.sessions.get(session_id)

@@ -83,6 +83,12 @@ class TITOTokenizer:
 
     max_trim_tokens: int = 0
     trailing_token_ids: frozenset[int] = frozenset()
+    #: The image placeholder the family's template writes once per image
+    #: (``<|image_pad|>`` for the Qwen vision models). The engine expands it to
+    #: the image's token count; the session server expands the recorded prompt
+    #: the same way when it builds samples (miles.rollout.session.media).
+    #: None: the family carries no images.
+    image_pad_token: str | None = None
     chat_template_kwarg_aliases: frozenset[str] = frozenset()
 
     # The family's fixed renderer contract. DEFAULT uses the model's native
@@ -156,6 +162,17 @@ class TITOTokenizer:
 
     def _encode_text(self, text: str) -> list[int]:
         return self.tokenizer.encode(text, add_special_tokens=False)
+
+    def image_pad_id(self) -> int | None:
+        """The id of ``image_pad_token`` in this tokenizer, or None when the
+        family or the tokenizer has no image placeholder."""
+        if self.image_pad_token is None:
+            return None
+        pad = self.tokenizer.convert_tokens_to_ids(self.image_pad_token)
+        unk = getattr(self.tokenizer, "unk_token_id", None)
+        if not isinstance(pad, int) or pad == unk:
+            return None
+        return pad
 
     def _tokenize_rendered_suffix(
         self,
@@ -248,6 +265,7 @@ class Qwen3TITOTokenizer(TITOTokenizer):
 
     reasoning_parser = "qwen3"
     tool_call_parser = "qwen25"
+    image_pad_token = "<|image_pad|>"
 
     FIXED_TEMPLATE = FixedTemplate(
         template="qwen3_fixed.jinja",

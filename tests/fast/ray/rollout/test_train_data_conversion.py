@@ -885,3 +885,45 @@ class TestSplitTrainDataByDpScheduled:
         assert shards[0]["num_microbatches"] == [2, 2]
         assert shards[0]["dynamic_global_batch_size"] == 8
         assert shards[0]["num_rollouts"] == [8, 8]
+
+
+class TestRolloutsPerStepOnTheLegacySplit:
+    """A batch whose rollouts hold several samples divides its loss and
+    metrics by the rollout count, not the sample count: the legacy split now
+    stamps ``num_rollouts`` like the rollout-side schedule does."""
+
+    @staticmethod
+    def _data(rollout_ids, gbs=None):
+        data = {"tokens": [[0]] * len(rollout_ids), "rollout_ids": list(rollout_ids)}
+        if gbs is not None:
+            data["dynamic_global_batch_size"] = gbs
+        return data
+
+    def test_segments_of_the_same_rollout_count_once(self):
+        from types import SimpleNamespace
+
+        from miles.ray.rollout.train_data_conversion import _rollouts_per_step
+
+        args = SimpleNamespace(global_batch_size=4)
+        # 2 rollouts split into 5 samples, one step (dynamic batch of 5 -> 6 at dp 2 would pad; use 5 here).
+        assert _rollouts_per_step(args, self._data([7, 7, 7, 9, 9], gbs=5)) == [2]
+        # one sample per rollout: the fallback already divides by the right number
+        assert _rollouts_per_step(args, self._data([1, 2, 3, 4])) is None
+        # several steps per rollout batch: the count per step is undefined here
+        assert _rollouts_per_step(args, self._data([1, 1, 2, 2, 3, 3, 4, 4])) is None
+        assert _rollouts_per_step(args, {"tokens": [[0]]}) is None
+
+    def test_the_raw_split_stamps_every_shard(self):
+        from types import SimpleNamespace
+
+        from miles.ray.rollout.train_data_conversion import split_train_data_by_dp_raw
+
+        args = SimpleNamespace(global_batch_size=2, balance_data=False)
+        data = {
+            "tokens": [[1, 2], [3], [4, 5], [6]],
+            "rollout_ids": [7, 7, 9, 9],
+            "dynamic_global_batch_size": 4,
+            "response_lengths": [1, 1, 1, 1],
+        }
+        shards = split_train_data_by_dp_raw(args, data, dp_size=2)
+        assert [shard["num_rollouts"] for shard in shards] == [[2], [2]]

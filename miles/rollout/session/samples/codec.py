@@ -13,6 +13,7 @@ from copy import copy, deepcopy
 
 import numpy as np
 import safetensors.numpy
+import torch
 
 from miles.utils.types import Sample
 
@@ -41,6 +42,9 @@ SAMPLES_VALUE_SPEC: dict[str, ValueSpec] = {
     "weight_versions": ValueSpec("json"),
     "prefix_cache_info": ValueSpec("json"),
     "metadata": ValueSpec("json"),
+    # The sample's images in the trainer's PNG format (miles.rollout.session.media.train_inputs):
+    # a dict of arrays, each shipped as its own tensor; None for a text sample.
+    "multimodal_train_inputs": ValueSpec("tensor_dict"),
 }
 
 # Tree-serving v2 adds `Sample.reward` to the wire.
@@ -54,7 +58,7 @@ COMPUTED_FIELDS = tuple(SAMPLES_VALUE_SPEC)
 COMPUTED_FIELDS_V2 = tuple(SAMPLES_VALUE_SPEC_V2)
 
 assert all(
-    spec.codec in ("tensor", "tensor_list", "json") for spec in SAMPLES_VALUE_SPEC_V2.values()
+    spec.codec in ("tensor", "tensor_list", "json", "tensor_dict") for spec in SAMPLES_VALUE_SPEC_V2.values()
 ), "unknown codec in SAMPLES_VALUE_SPEC"
 
 _TENSOR_FIELDS = frozenset(field for field, spec in SAMPLES_VALUE_SPEC_V2.items() if spec.codec != "json")
@@ -115,6 +119,14 @@ def encode_samples(
                 continue
             if value is None:
                 nulls.append(field)
+                continue
+            if spec.codec == "tensor_dict":
+                if not isinstance(value, dict):
+                    raise TypeError(f"{field} must be a dict of arrays, got {type(value).__name__}")
+                sample_meta[f"{field}_keys"] = list(value)
+                for key, item in value.items():
+                    arr = item.detach().cpu().numpy() if hasattr(item, "detach") else np.asarray(item)
+                    tensors[f"{field}.{key}.{sample_index}"] = np.ascontiguousarray(arr)
                 continue
             if spec.strict:
                 arr = np.asarray(value)
@@ -182,6 +194,19 @@ def decode_samples_and_merge_input_sample(
                 continue
             if field in nulls:
                 setattr(sample, field, copy(spec.null))
+                continue
+            if spec.codec == "tensor_dict":
+                keys = sample_meta.get(f"{field}_keys")
+                if not isinstance(keys, list):
+                    raise ValueError(f"{field} keys missing from the sample metadata")
+                setattr(
+                    sample,
+                    field,
+                    {
+                        key: torch.from_numpy(np.ascontiguousarray(tensors.pop(f"{field}.{key}.{sample_index}")))
+                        for key in keys
+                    },
+                )
                 continue
             arr = tensors.pop(f"{field}.{sample_index}")  # KeyError propagates: a promised tensor must exist
             if arr.dtype != spec.dtype:
