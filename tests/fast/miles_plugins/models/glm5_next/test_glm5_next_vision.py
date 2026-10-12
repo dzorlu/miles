@@ -1,3 +1,4 @@
+import pytest
 import torch
 from transformers.models.glm_ocr.configuration_glm_ocr import GlmOcrVisionConfig
 
@@ -38,3 +39,41 @@ def test_encoding_a_subset_of_images_gives_their_rows_of_encoding_all():
     assert everything.shape == (int(rows.sum()), 24)
     expected = torch.cat([everything[: rows[0]], everything[rows[0] + rows[1] :]])
     torch.testing.assert_close(subset, expected)
+
+
+def test_png_rebuild_falls_back_to_the_engine_processor(monkeypatch):
+    """AutoProcessor gives a bare tokenizer for GLM-5.3 on transformers 5.12.1;
+    the encoder then uses SGLang's Glm5NextProcessor instead of failing."""
+    import sys
+    import types
+
+    import importlib.util
+    from pathlib import Path
+
+    # The module file alone: the package __init__ imports the fla kernels.
+    path = Path(__file__).resolve().parents[5] / "miles/backends/torchtitan_utils/models/glm5_next/vision.py"
+    spec = importlib.util.spec_from_file_location("titan_glm5_next_vision", path)
+    titan_vision = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(titan_vision)
+
+    class FakeProcessor:
+        image_processor = object()
+
+        @classmethod
+        def from_pretrained(cls, path, **kwargs):
+            assert kwargs.get("trust_remote_code") is True
+            return cls()
+
+    module = types.ModuleType("sglang.srt.configs.glm5_next_processing")
+    module.Glm5NextProcessor = FakeProcessor
+    monkeypatch.setitem(sys.modules, "sglang.srt.configs.glm5_next_processing", module)
+    monkeypatch.setattr(titan_vision, "load_processor", lambda *args, **kwargs: None)
+    encoder = titan_vision.Glm5NextImageEncoder.__new__(titan_vision.Glm5NextImageEncoder)
+    encoder._hf_checkpoint = "/ckpt"
+    assert encoder.image_processor is FakeProcessor.image_processor
+
+    monkeypatch.setitem(sys.modules, "sglang.srt.configs.glm5_next_processing", None)
+    encoder = titan_vision.Glm5NextImageEncoder.__new__(titan_vision.Glm5NextImageEncoder)
+    encoder._hf_checkpoint = "/ckpt"
+    with pytest.raises(RuntimeError, match="has no image processor"):
+        _ = encoder.image_processor
