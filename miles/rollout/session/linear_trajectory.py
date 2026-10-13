@@ -426,8 +426,16 @@ class SessionRegistry:
         return session_id
 
     def new_media_store(self) -> MediaStore:
-        pad_lookup = getattr(self.tito_tokenizer, "image_pad_id", None)
-        return MediaStore(self.processor, pad_lookup() if callable(pad_lookup) else None)
+        # Duck-typed TITO stubs (tests/fast/rollout/session/test_score_centering.py) carry no image table.
+        tito = self.tito_tokenizer
+        tokens = getattr(tito, "image_tokens", None)  # config-access-exempt: TITO stubs omit the image table
+        pad_lookup = getattr(tito, "image_pad_id", None)  # config-access-exempt: TITO stubs omit the image table
+        return MediaStore(
+            self.processor,
+            pad_lookup() if pad_lookup is not None else None,
+            expands=tokens.expands if tokens is not None else True,
+            family=type(tito).__name__,
+        )
 
     def get_session(self, session_id: str) -> LinearTrajectory:
         session = self.sessions.get(session_id)
