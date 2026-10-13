@@ -194,6 +194,7 @@ class SessionCoreV2(SessionCore):
         inference call so DELETE/other ops are not blocked if the agent disconnects.
         """
         request_timestamp = time.time()
+        t_prepare = time.perf_counter()
         session = self.registry.get_session(session_id)
         if session.closing:
             raise SessionNotFoundError(f"session not found: session_id={session_id}")
@@ -226,10 +227,12 @@ class SessionCoreV2(SessionCore):
         # --- lock released ---
 
         # --- Phase 2: proxy to backend (NO lock held) ---
+        t_proxy = time.perf_counter()
         headers = {**headers, "X-SMG-Routing-Key": session_id}
         result = await self.backend.do_proxy(
             ProxyRequest(method=method, query=query), "v1/chat/completions", body=proxy_body, headers=headers
         )
+        t_commit = time.perf_counter()
 
         # Non-200 (e.g. 400 context too long) passes through unrecorded so the
         # agent can retry or handle the error.
@@ -272,6 +275,16 @@ class SessionCoreV2(SessionCore):
                 turn_args=request_body,
             )
         # --- lock released ---
+        if getattr(self.config, "session_chat_timing_log", False):
+            done = time.perf_counter()
+            logger.info(
+                "chat timing: session=%s prepare=%.3fs proxy=%.3fs commit=%.3fs prompt_tokens=%s",
+                session_id,
+                t_proxy - t_prepare,
+                t_commit - t_proxy,
+                done - t_commit,
+                (response.get("usage") or {}).get("prompt_tokens"),
+            )
 
         return _chat_client_response(result, response, response_intent)
 
