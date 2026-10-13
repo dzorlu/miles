@@ -32,9 +32,9 @@ class SessionServerConfig(FrozenStrictBaseModel):
     rollout_sampling_logprobs_mode: str
     rollout_temperature: float
     # Share of sessions whose samples op computes tito_session_mismatch (0 = never).
-    tito_session_mismatch_rate: float = 0.0
+    tito_session_mismatch_rate: float
     # Log prepare/proxy/commit seconds per chat completion (v2).
-    session_chat_timing_log: bool = False
+    session_chat_timing_log: bool
 
 
 def compute_session_server_config(
