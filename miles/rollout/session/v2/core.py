@@ -1,3 +1,5 @@
+import asyncio
+import hashlib
 import logging
 import time
 from copy import deepcopy
@@ -47,15 +49,33 @@ class SessionCoreV2(SessionCore):
         self.sample_picker = load_function(config.session_sample_picker_path, sync_required=True)
         self.sample_postprocessor = load_function(config.session_sample_postprocessor_path, sync_required=True)
 
-    def _session_metadata(self, session_id: str, session) -> dict:
+    def mismatch_sampled(self, session_id: str) -> bool:
+        """Whether this session's samples op computes tito_session_mismatch:
+        a per-session draw from a hash of its id against
+        ``--tito-session-mismatch-rate`` (0 never, 1 always). The diagnostic
+        re-renders the whole conversation, seconds for a 260K-token session,
+        and only reports; nothing trains on it."""
+        rate = float(getattr(self.config, "tito_session_mismatch_rate", 0.0) or 0.0)
+        if rate >= 1.0:
+            return True
+        if rate <= 0.0:
+            return False
+        draw = int(hashlib.sha256(session_id.encode()).hexdigest()[:8], 16) / 0xFFFFFFFF
+        return draw < rate
+
+    def _session_metadata(self, session_id: str, session, *, with_mismatch: bool = True) -> dict:
         """Mirrors ``core.SessionCore._session_metadata``: token ids come from
-        the latest committed generation's path, plus the ``tree`` block."""
+        the latest committed generation's path, plus the ``tree`` block.
+        ``with_mismatch`` False skips the tito_session_mismatch diagnostic
+        (the samples op passes ``mismatch_sampled``; the debug read keeps it)."""
         metadata: dict = {}
-        try:
-            mismatch = self.registry.compute_session_mismatch(session)
-        except TokenizationError:
-            logger.exception("Failed to compute tito_session_mismatch for session %s", session_id)
-            mismatch = None
+        mismatch = None
+        if with_mismatch:
+            try:
+                mismatch = self.registry.compute_session_mismatch(session)
+            except TokenizationError:
+                logger.exception("Failed to compute tito_session_mismatch for session %s", session_id)
+                mismatch = None
         if mismatch is not None:
             metadata["tito_session_mismatch"] = mismatch
         latest = session.latest()
@@ -83,12 +103,36 @@ class SessionCoreV2(SessionCore):
         """Samples op: assemble one raw sample per leaf, then run the
         pick/post-process hook pipeline and encode the result.
 
-        Synchronous on the server loop (no await), so the session read cannot
-        interleave with chat commits. Deterministic assembly/hook failures map
+        The build runs in a worker thread under the session's own lock: the
+        lock keeps chat commits of this session out while the tree is read,
+        and the event loop keeps serving every other session. On the loop it
+        froze a whole server instance for 160 to 190 s per 320-turn session
+        (13 sessions, 2026-10-13). Deterministic assembly/hook failures map
         to 422; unknown exceptions propagate.
         """
         session = self.registry.get_session(session_id)
-        metadata = self._session_metadata(session_id, session)
+        started = time.perf_counter()
+        async with session.lock:
+            response = await asyncio.to_thread(
+                self._collect_samples_sync, session_id, session, max_seq_len, agent_metadata
+            )
+        latest = session.latest()
+        logger.info(
+            "samples op: session=%s status=%s tokens=%d nodes=%d %.1fs off the event loop",
+            session_id,
+            response.status_code,
+            len(latest.token_ids) if latest is not None else 0,
+            len(session.tree.nodes),
+            time.perf_counter() - started,
+        )
+        return response
+
+    def _collect_samples_sync(
+        self, session_id: str, session, max_seq_len: int | None, agent_metadata: dict | None
+    ) -> Response:
+        """The samples build, pure CPU work on the session's tree and media;
+        called in a thread with the session lock held."""
+        metadata = self._session_metadata(session_id, session, with_mismatch=self.mismatch_sampled(session_id))
         fields = COMPUTED_FIELDS_V2
         if session.sampling_support_replay:
             fields += ROLLOUT_SAMPLING_MASK_FIELDS
