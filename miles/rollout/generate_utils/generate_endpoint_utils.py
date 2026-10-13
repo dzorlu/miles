@@ -19,20 +19,25 @@ from miles.utils.types import Sample
 
 
 def image_pad_id_for(state) -> int | None:
-    """The id of the image placeholder token the engine expands, or None when
-    the state carries no image processor. HF vision processors name the token
-    (``processor.image_token``, ``<|image_pad|>`` for the Qwen VL family);
-    a TITO tokenizer family may name it too (``image_pad_token``)."""
+    """The id of the image placeholder the engine expands, or None when no
+    placeholder applies. The TITO family's image-token table decides first
+    (``TITOTokenizer.image_tokens``: a family whose placeholder the engine
+    does not expand collapses nothing); without a TITO family, the HF vision
+    processor names the token (``processor.image_token``); a text model has
+    neither."""
+    tito = getattr(state, "tito_tokenizer", None)
+    tokens = getattr(tito, "image_tokens", None)
+    if tokens is not None:
+        if not tokens.expands:
+            return None
+        return int(tito.image_token_ids()["placeholder"])
     processor = getattr(state, "processor", None)
     token = getattr(processor, "image_token", None) if processor is not None else None
-    if token is None:
-        tito = getattr(state, "tito_tokenizer", None)
-        token = getattr(tito, "image_pad_token", None)
     if not token:
         return None
     pad = state.tokenizer.convert_tokens_to_ids(token)
     unk = getattr(state.tokenizer, "unk_token_id", None)
-    if pad is None or pad == unk:
+    if not isinstance(pad, int) or pad == unk:
         return None
     return int(pad)
 
@@ -106,10 +111,12 @@ def compute_request_payload(
     image_pad_id: int | None = None,
 ) -> tuple[dict[str, Any] | None, Sample.Status | None]:
     """The ``/generate`` request for ``input_ids`` (the model's view: the
-    image placeholders already expanded by the processor). With images and
-    ``image_pad_id``, the request carries one placeholder per image
-    (``collapse_image_pads``); the context arithmetic uses the expanded
-    length, which is what the engine runs."""
+    image placeholders already expanded by the processor). With images the
+    request carries one placeholder per image (``collapse_image_pads``,
+    ``image_pad_id`` from ``image_pad_id_for``); images without a known
+    placeholder are refused rather than sent expanded, which the engine would
+    re-tokenize. The context arithmetic uses the expanded length, which is
+    what the engine runs."""
     sampling_params = deepcopy(sampling_params)
     max_new_tokens = sampling_params.pop("max_new_tokens", args.rollout_max_response_len)
     if x := args.rollout_max_context_len:
@@ -132,8 +139,14 @@ def compute_request_payload(
         payload["lora_path"] = LORA_ADAPTER_NAME
     if image_data := (multimodal_inputs or {}).get("images"):
         payload["image_data"] = [encode_image_for_rollout_engine(image) for image in image_data]
-        if image_pad_id is not None:
-            payload["input_ids"] = collapse_image_pads(input_ids, image_pad_id)
+        if image_pad_id is None:
+            raise ValueError(
+                "the sample carries images but no image placeholder is known for this model: the TITO "
+                "family has no entry in the image-token table (ImageTokens, "
+                "miles.utils.chat_template_utils.tito_tokenizer) and the processor names no image_token; "
+                "the engine would re-tokenize the prompt"
+            )
+        payload["input_ids"] = collapse_image_pads(input_ids, image_pad_id)
 
     if not evaluation:
         configure_rollout_topk_logprobs_request(args, payload)
