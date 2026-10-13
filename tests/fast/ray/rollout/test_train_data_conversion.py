@@ -1197,6 +1197,26 @@ class TestRolloutsPerStepOnTheLegacySplit:
         shards = split_train_data_by_dp_raw(args, data, dp_size=2)
         assert all("num_rollouts" not in shard for shard in shards)
 
+    def test_multi_lora_neither_stamps_nor_refuses(self):
+        """Under multi-LoRA the loss carries the client's normalization
+        (objective.py sets loss_normalizer = 1), so multi-sample rollouts over
+        several steps are left alone: no rollout count, no ValueError."""
+        from types import SimpleNamespace
+
+        from miles.ray.rollout.train_data_conversion import _rollouts_per_step, split_train_data_by_dp_raw
+
+        args = SimpleNamespace(global_batch_size=4, balance_data=False, multi_lora=True)
+        data = {
+            "tokens": [[1]] * 8,
+            "rollout_ids": [1, 1, 2, 2, 3, 3, 4, 4],
+            "response_lengths": [1] * 8,
+        }
+        assert _rollouts_per_step(args, data) is None
+        shards = split_train_data_by_dp_raw(args, data, dp_size=2)
+        assert all("num_rollouts" not in shard for shard in shards)
+        one_step = SimpleNamespace(global_batch_size=8, balance_data=False, multi_lora=True)
+        assert _rollouts_per_step(one_step, data) is None
+
     def test_the_raw_split_stamps_every_shard(self):
         from types import SimpleNamespace
 
