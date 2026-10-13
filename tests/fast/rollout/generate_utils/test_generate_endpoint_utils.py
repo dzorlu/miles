@@ -69,16 +69,37 @@ def test_collapse_keeps_one_pad_per_run():
     assert collapse_image_pads([], PAD) == []
 
 
-def test_image_pad_id_comes_from_the_processor_then_the_tito_family():
-    tok = SimpleNamespace(convert_tokens_to_ids=lambda t: {"<|image_pad|>": PAD}.get(t, 0), unk_token_id=0)
-    assert (
-        image_pad_id_for(SimpleNamespace(tokenizer=tok, processor=SimpleNamespace(image_token="<|image_pad|>"))) == PAD
+def test_image_pad_id_comes_from_the_family_table_then_the_processor():
+    from miles.utils.chat_template_utils.tito_tokenizer import ImageTokens
+
+    tok = SimpleNamespace(convert_tokens_to_ids=lambda t: {"<|image_pad|>": PAD, "<|image|>": 7}.get(t, 0), unk_token_id=0)
+    processor = SimpleNamespace(image_token="<|image_pad|>")
+    # the TITO family's table entry wins over the processor's token
+    glm = SimpleNamespace(
+        image_tokens=ImageTokens("<|begin_of_image|>", "<|image|>", "<|end_of_image|>"),
+        image_token_ids=lambda: {"begin": 5, "placeholder": 7, "end": 6},
     )
-    tito = SimpleNamespace(image_pad_token="<|image_pad|>")
-    assert image_pad_id_for(SimpleNamespace(tokenizer=tok, processor=None, tito_tokenizer=tito)) == PAD
+    assert image_pad_id_for(SimpleNamespace(tokenizer=tok, processor=processor, tito_tokenizer=glm)) == 7
+    # a family whose placeholder the engine does not expand collapses nothing
+    fixed = SimpleNamespace(image_tokens=ImageTokens(None, "<|image|>", None, expands=False), image_token_ids=lambda: {"placeholder": 7})
+    assert image_pad_id_for(SimpleNamespace(tokenizer=tok, processor=processor, tito_tokenizer=fixed)) is None
+    # a family without an entry falls through to the processor's token
+    text_family = SimpleNamespace(image_tokens=None, image_token_ids=lambda: None)
+    assert image_pad_id_for(SimpleNamespace(tokenizer=tok, processor=processor, tito_tokenizer=text_family)) == PAD
+    assert image_pad_id_for(SimpleNamespace(tokenizer=tok, processor=processor)) == PAD
     assert image_pad_id_for(SimpleNamespace(tokenizer=tok, processor=None)) is None
     unknown = SimpleNamespace(tokenizer=tok, processor=SimpleNamespace(image_token="<|no_such|>"))
     assert image_pad_id_for(unknown) is None, "an unknown token must not collapse anything"
+
+
+def test_images_without_a_known_placeholder_are_refused(monkeypatch):
+    import pytest
+
+    import miles.rollout.generate_utils.generate_endpoint_utils as m
+
+    monkeypatch.setattr(m, "encode_image_for_rollout_engine", lambda image: f"b64:{image}")
+    with pytest.raises(ValueError, match="image-token table"):
+        compute_request_payload(_args(), [1, PAD, 2], {}, multimodal_inputs={"images": ["img"]}, image_pad_id=None)
 
 
 def test_request_carries_one_pad_per_image_and_counts_the_expanded_length(monkeypatch):
@@ -98,9 +119,6 @@ def test_request_carries_one_pad_per_image_and_counts_the_expanded_length(monkey
     assert payload["image_data"] == ["b64:img0"]
     # the context arithmetic uses the expanded length the engine will run
     assert payload["sampling_params"]["max_new_tokens"] == 12 - len(expanded)
-    # no pad id: the request is unchanged (the previous behaviour)
-    payload, _ = compute_request_payload(_args(), expanded, {}, multimodal_inputs={"images": ["img0"]})
-    assert payload["input_ids"] == expanded
     # no images: nothing to collapse even with a pad id
     payload, _ = compute_request_payload(_args(), [1, PAD, PAD, 2], {}, image_pad_id=PAD)
     assert payload["input_ids"] == [1, PAD, PAD, 2]

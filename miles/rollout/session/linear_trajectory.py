@@ -415,8 +415,15 @@ class SessionRegistry:
         return session_id
 
     def new_media_store(self) -> MediaStore:
-        pad_lookup = getattr(self.tito_tokenizer, "image_pad_id", None)
-        return MediaStore(self.processor, pad_lookup() if callable(pad_lookup) else None)
+        tito = self.tito_tokenizer
+        tokens = getattr(tito, "image_tokens", None)
+        pad_lookup = getattr(tito, "image_pad_id", None)
+        return MediaStore(
+            self.processor,
+            pad_lookup() if callable(pad_lookup) else None,
+            expands=tokens.expands if tokens is not None else True,
+            family=type(tito).__name__ if tito is not None else None,
+        )
 
     def get_session(self, session_id: str) -> LinearTrajectory:
         session = self.sessions.get(session_id)
