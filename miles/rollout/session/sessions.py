@@ -77,12 +77,16 @@ def setup_session_routes(app, backend, config: SessionServerConfig, *, use_addit
     # The image processor of a vision model (None for a text model): the
     # sessions count and grid their images with it (miles.rollout.session.media).
     processor = load_processor(config.hf_checkpoint, trust_remote_code=True)
-    if processor is not None and tito_tokenizer.image_pad_id() is None:
-        logger.info(
-            "[session] %s has an image processor but TITO family %r has no image placeholder; images are refused",
+    image_token_ids = tito_tokenizer.image_token_ids()  # raises when the family names a token this tokenizer lacks
+    if processor is not None and image_token_ids is None:
+        logger.warning(
+            "[session] %s has an image processor but TITO family %r has no entry in the image-token table "
+            "(ImageTokens, miles.utils.chat_template_utils.tito_tokenizer); requests with images are refused",
             config.hf_checkpoint,
             config.tito_model,
         )
+    elif image_token_ids is not None:
+        logger.info("[session] TITO family %r image tokens: %s", config.tito_model, image_token_ids)
 
     use_v2 = config.use_session_server == "v2"
     if use_v2:
