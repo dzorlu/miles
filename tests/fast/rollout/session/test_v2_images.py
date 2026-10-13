@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import uuid
 
 import pytest
@@ -41,16 +42,31 @@ def tokenizer():
     return tok
 
 
+GLM_MODEL = os.environ.get("MILES_TEST_GLM53_TOKENIZER", "zai-org/GLM-5.3-Flash")
+
+
+@pytest.fixture(scope="module")
+def glm_tokenizer():
+    """The GLM-5.3 tokenizer with its native template (the glm53 family fixes no template)."""
+    from transformers import AutoTokenizer
+
+    try:
+        return AutoTokenizer.from_pretrained(GLM_MODEL, trust_remote_code=True)
+    except Exception as e:  # noqa: BLE001 - no network or no cache
+        pytest.skip(f"{GLM_MODEL} tokenizer unavailable: {e}")
+
+
 class ExactTokenEngine:
     """A chat backend that behaves like SGLang's exact-token path: it runs the
     request ids as sent, expands each image placeholder to the processor's
     count, and reports that prompt length."""
 
-    def __init__(self, tokenizer, pad_id: int, counts: dict[str, int], reply: str):
+    def __init__(self, tokenizer, pad_id: int, counts: dict[str, int], reply: str, end_token: str = "<|im_end|>"):
         self.tokenizer = tokenizer
         self.pad_id = pad_id
         self.counts = counts  # data URL -> token count
         self.reply = reply
+        self.end_token = end_token  # the family's assistant stop token
         self.bodies: list[dict] = []
 
     async def do_proxy(self, request, path, *, body, headers):
@@ -67,7 +83,7 @@ class ExactTokenEngine:
         assert all(url.startswith("data:") for url in urls), "the engine must receive data URLs"
         prompt_tokens = len(input_ids) - len(urls) + sum(self.counts[url] for url in urls)
         output_ids = self.tokenizer.encode(self.reply, add_special_tokens=False) + [
-            self.tokenizer.convert_tokens_to_ids("<|im_end|>")
+            self.tokenizer.convert_tokens_to_ids(self.end_token)
         ]
         response = {
             "id": f"stub-{len(self.bodies)}",
@@ -231,3 +247,109 @@ def test_a_text_only_server_refuses_images(tokenizer):
                 }
             ],
         )
+
+
+def _image_urls_of(messages):
+    return [
+        p["image_url"]["url"]
+        for m in messages
+        if isinstance(m.get("content"), list)
+        for p in m["content"]
+        if p.get("type") == "image_url"
+    ]
+
+
+def test_images_flow_through_the_v2_session_server_for_glm53(glm_tokenizer):
+    """The second family in the image-token table: GLM-5.3 writes
+    <|begin_of_image|><|image|><|end_of_image|> per image; one <|image|> goes
+    on the wire per image, the record expands it between the markers."""
+    tito = get_tito_tokenizer(glm_tokenizer, tokenizer_type="glm53")
+    ids = tito.image_token_ids()
+    begin_id, pad_id, end_id = ids["begin"], ids["placeholder"], ids["end"]
+    assert pad_id == glm_tokenizer.convert_tokens_to_ids("<|image|>")
+    first_url, second_url = _data_url(_png()), _data_url(_png(width=128, color=(5, 5, 5)))
+    engine = ExactTokenEngine(glm_tokenizer, pad_id, {first_url: 4, second_url: 8}, reply="ok", end_token="<|user|>")
+    config = make_session_server_config(
+        use_session_server="v2",
+        hf_checkpoint=GLM_MODEL,
+        tito_model="glm53",
+        instance_id=uuid.uuid4().hex,
+        session_sample_picker_path="miles.rollout.session.v2.picker_hub.drop_rolled_back_leaves",
+        session_sample_postprocessor_path="miles.rollout.session.v2.postprocessor_hub.default_postprocess",
+    )
+    registry = SessionRegistryV2(glm_tokenizer, tito_tokenizer=tito, processor=FakeProcessor())
+    core = SessionCoreV2(engine, registry, config, config.instance_id)
+    session_id = registry.create_session()
+
+    turn1 = [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "look"}, {"type": "image_url", "image_url": {"url": first_url}}],
+        }
+    ]
+    response = _chat(core, session_id, turn1)
+    assert response.status_code == 200, response.body
+    assistant = json.loads(response.body)["choices"][0]["message"]
+    turn2 = turn1 + [
+        assistant,
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "next"}, {"type": "image_url", "image_url": {"url": second_url}}],
+        },
+    ]
+    assert _chat(core, session_id, turn2).status_code == 200
+
+    # one placeholder per image on the wire, each between its markers
+    wires = [body["input_ids"] for body in engine.bodies]
+    assert [wire.count(pad_id) for wire in wires] == [1, 2]
+    for wire in wires:
+        for position in [i for i, t in enumerate(wire) if t == pad_id]:
+            assert wire[position - 1] == begin_id and wire[position + 1] == end_id
+    assert all(url.startswith("data:") for body in engine.bodies for url in _image_urls_of(body["messages"]))
+    session = registry.get_session(session_id)
+    assert len(session.media.entries) == 2
+
+    # the sample expands each placeholder to the processor's count, markers kept
+    reply = asyncio.run(core.collect_samples(session_id, max_seq_len=None))
+    assert reply.status_code == 200, reply.body
+    decoded = decode_samples_and_merge_input_sample(reply.body, Sample(), fields=COMPUTED_FIELDS_V2)
+    (sample,) = decoded.samples
+    wire = wires[1]
+    reply_len = len(glm_tokenizer.encode("ok", add_special_tokens=False)) + 1  # plus <|user|>
+    assert sample.tokens.count(pad_id) == 12 and len(sample.tokens) == len(wire) - 2 + 12 + reply_len
+    runs = [i for i, t in enumerate(sample.tokens) if t == pad_id]
+    assert sample.tokens[runs[0] - 1] == begin_id and sample.tokens[runs[3] + 1] == end_id
+    assert sample.tokens[runs[4] - 1] == begin_id and sample.tokens[runs[11] + 1] == end_id
+    mm = sample.multimodal_train_inputs
+    assert mm["image_grid_thw"].tolist() == [[1, 4, 4], [1, 4, 8]]
+    assert mm["image_png_lengths"].sum().item() == mm["image_png"].numel()
+
+
+def test_a_family_without_a_table_entry_refuses_images_and_names_the_table(tokenizer):
+    """A vision checkpoint served with a TITO family that has no ImageTokens
+    entry (here: qwen3, a text family, on the Qwen3.8 tokenizer) refuses the
+    request instead of sending expanded ids the engine would re-tokenize."""
+    tito = get_tito_tokenizer(tokenizer, tokenizer_type="qwen3")
+    assert tito.image_tokens is None
+    engine = ExactTokenEngine(tokenizer, 0, {}, reply="ok")
+    config = make_session_server_config(
+        use_session_server="v2",
+        hf_checkpoint=MODEL,
+        tito_model="qwen3",
+        instance_id=uuid.uuid4().hex,
+        session_sample_picker_path="miles.rollout.session.v2.picker_hub.drop_rolled_back_leaves",
+        session_sample_postprocessor_path="miles.rollout.session.v2.postprocessor_hub.default_postprocess",
+    )
+    registry = SessionRegistryV2(tokenizer, tito_tokenizer=tito, processor=FakeProcessor())
+    core = SessionCoreV2(engine, registry, config, config.instance_id)
+    session_id = registry.create_session()
+    from miles.rollout.session.errors import MessageValidationError
+
+    url = _data_url(_png())
+    messages = [
+        {"role": "user", "content": [{"type": "text", "text": "look"}, {"type": "image_url", "image_url": {"url": url}}]}
+    ]
+    with pytest.raises(MessageValidationError, match="image-token table") as info:
+        _chat(core, session_id, messages)
+    assert "Qwen3TITOTokenizer" in str(info.value)
+    assert engine.bodies == [], "nothing reached the engine"
