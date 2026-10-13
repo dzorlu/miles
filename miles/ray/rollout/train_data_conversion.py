@@ -453,6 +453,11 @@ def _rollouts_per_step(args, data: dict[str, Any]) -> list[int] | None:
     Several steps per round with multi-sample rollouts is refused: this split
     cannot divide each step by its own rollout count, and dividing by samples
     silently scales the loss (the rollout-side schedule handles that shape)."""
+    if is_multi_lora_enabled(args):
+        # Tinker losses carry the client's normalization: loss_function sets
+        # loss_normalizer = 1 under multi-LoRA (objective.py), so no rollout
+        # count is needed there and several steps per round stay allowed.
+        return None
     rollout_ids = data.get("rollout_ids")
     if rollout_ids is None:
         return None
