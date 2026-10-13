@@ -169,6 +169,9 @@ def test_a_cancelled_collection_keeps_the_lock_until_the_worker_ends(tokenizer, 
         task = asyncio.create_task(core.collect_samples(session_id, max_seq_len=None))
         await asyncio.sleep(0.1)
         task.cancel()
+        await asyncio.sleep(0.1)
+        assert session.lock.locked(), "still held while the worker runs"
+        task.cancel()  # a second cancel (client retry, shutdown) must not release it either
         with pytest.raises(asyncio.CancelledError):
             await task
         phase["lock_at_cancel_return"] = (time.perf_counter(), session.lock.locked())
