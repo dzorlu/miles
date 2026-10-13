@@ -126,3 +126,22 @@ def test_the_debug_read_keeps_the_diagnostic(tokenizer):
     core, session_id = _core(tokenizer, tito_session_mismatch_rate=0.0)
     response = asyncio.run(core.get_session(session_id))
     assert "tito_session_mismatch" in json.loads(response.body)["metadata"]
+
+
+def test_the_chat_timing_log_reports_the_three_phases(tokenizer, caplog):
+    import logging
+
+    core, session_id = _core(tokenizer, session_chat_timing_log=True)
+    with caplog.at_level(logging.INFO, logger="miles.rollout.session.v2.core"):
+        _chat(core, session_id, [{"role": "user", "content": "again"}])
+    lines = [r.getMessage() for r in caplog.records if r.getMessage().startswith("chat timing: session=")]
+    assert lines and all(k in lines[-1] for k in ("prepare=", "proxy=", "commit=", "prompt_tokens="))
+
+
+def test_the_chat_timing_log_is_off_by_default(tokenizer, caplog):
+    import logging
+
+    core, session_id = _core(tokenizer)
+    with caplog.at_level(logging.INFO, logger="miles.rollout.session.v2.core"):
+        _chat(core, session_id, [{"role": "user", "content": "again"}])
+    assert not [r for r in caplog.records if r.getMessage().startswith("chat timing: session=")]
