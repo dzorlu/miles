@@ -11,7 +11,7 @@ from miles.backends.training_utils.weight_update.hf_weight_iterator.checkpoint_t
 def test_flag_names_the_towers_and_default_is_off():
     assert mm_tower_names(SimpleNamespace(mm_tower_sync=["visual"], custom_model_provider_path="x.y")) == ("visual",)
     assert mm_tower_names(SimpleNamespace(mm_tower_sync=[], custom_model_provider_path="x.y")) == ()
-    assert mm_tower_names(SimpleNamespace(mm_tower_sync=None, custom_model_provider_path="fti.vision.qwen3_5")) == ()
+    assert mm_tower_names(SimpleNamespace(mm_tower_sync=None, custom_model_provider_path="my_plugins.qwen_vl_provider")) == ()
 
 
 def test_inkling_provider_implies_its_two_towers():
