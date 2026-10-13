@@ -145,3 +145,35 @@ def test_the_chat_timing_log_is_off_by_default(tokenizer, caplog):
     with caplog.at_level(logging.INFO, logger="miles.rollout.session.v2.core"):
         _chat(core, session_id, [{"role": "user", "content": "again"}])
     assert not [r for r in caplog.records if r.getMessage().startswith("chat timing: session=")]
+
+
+def test_a_cancelled_collection_keeps_the_lock_until_the_worker_ends(tokenizer, monkeypatch):
+    """Review finding: a thread cannot be cancelled. If the request is
+    cancelled (client timeout) the lock must stay held until the build ends,
+    so a chat commit cannot change the tree under the worker."""
+    import time
+
+    real = core_module.build_leaf_material
+    phase = {"build_done": None, "lock_at_cancel_return": None}
+
+    def slow_build(*args, **kwargs):
+        time.sleep(0.5)
+        phase["build_done"] = time.perf_counter()
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(core_module, "build_leaf_material", slow_build)
+    core, session_id = _core(tokenizer)
+    session = core.registry.get_session(session_id)
+
+    async def run():
+        task = asyncio.create_task(core.collect_samples(session_id, max_seq_len=None))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        phase["lock_at_cancel_return"] = (time.perf_counter(), session.lock.locked())
+
+    asyncio.run(run())
+    returned_at, locked = phase["lock_at_cancel_return"]
+    assert phase["build_done"] is not None and returned_at >= phase["build_done"], "cancellation returned only after the build ended"
+    assert locked is False, "and released the lock afterwards"
