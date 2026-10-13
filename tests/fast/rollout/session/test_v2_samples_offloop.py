@@ -180,3 +180,30 @@ def test_a_cancelled_collection_keeps_the_lock_until_the_worker_ends(tokenizer, 
     returned_at, locked = phase["lock_at_cancel_return"]
     assert phase["build_done"] is not None and returned_at >= phase["build_done"], "cancellation returned only after the build ended"
     assert locked is False, "and released the lock afterwards"
+
+
+def test_a_build_error_after_cancellation_surfaces_as_the_cancellation(tokenizer, monkeypatch, caplog):
+    """Review finding: a timeout wrapper must see its cancellation, not the
+    worker's late error; the error is logged instead."""
+    import logging
+    import time
+
+    def failing_build(*args, **kwargs):
+        time.sleep(0.3)
+        raise RuntimeError("late build failure")
+
+    monkeypatch.setattr(core_module, "build_leaf_material", failing_build)
+    core, session_id = _core(tokenizer)
+    session = core.registry.get_session(session_id)
+
+    async def run():
+        task = asyncio.create_task(core.collect_samples(session_id, max_seq_len=None))
+        await asyncio.sleep(0.1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert not session.lock.locked()
+
+    with caplog.at_level(logging.WARNING, logger="miles.rollout.session.v2.core"):
+        asyncio.run(run())
+    assert any("failed after its request was cancelled" in r.getMessage() for r in caplog.records)
