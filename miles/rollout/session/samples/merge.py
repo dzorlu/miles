@@ -133,7 +133,10 @@ def expand_prompt_images(
     if media is None or not media.enabled:
         raise ValueError("the record carries images but this session server has no image processor")
     entries = [media.get(ref) for ref in refs]
-    expanded = expand_image_placeholders(prompt_token_ids, [e.num_tokens for e in entries], media.image_pad_id)
+    if media.expands:
+        expanded = expand_image_placeholders(prompt_token_ids, [e.num_tokens for e in entries], media.image_pad_id)
+    else:
+        expanded = list(prompt_token_ids)
     reported = record.response["choices"][0].get("meta_info", {}).get("prompt_tokens")
     if isinstance(reported, int) and reported != len(expanded):
         raise ValueError(

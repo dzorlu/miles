@@ -1,6 +1,8 @@
 """Images on the TITO session path.
 
-The chat template renders one ``<|image_pad|>`` per image, which is what the
+The chat template renders one placeholder per image (``<|image_pad|>`` for
+Qwen3-VL, ``<|image|>`` between its markers for GLM-V; the family's
+``ImageTokens`` entry in ``tito_tokenizer`` names it), which is what the
 engine wants: SGLang expands that placeholder into the image's token count
 in place and keeps every other id verbatim (``SGLANG_MM_AVOID_RETOKENIZE``).
 The trainer wants the expanded form plus the images, so the session server
@@ -83,9 +85,15 @@ def _as_png(media_type: str, data: bytes) -> tuple[bytes, Any]:
 class MediaStore:
     """Content-addressed images of one session, with the processor's count and grid."""
 
-    def __init__(self, processor: Any, image_pad_id: int | None) -> None:
+    def __init__(
+        self, processor: Any, image_pad_id: int | None, *, expands: bool = True, family: str | None = None
+    ) -> None:
         self.processor = processor
         self.image_pad_id = image_pad_id
+        #: The engine expands one placeholder into the image's token count
+        #: (``ImageTokens.expands``); the samples expand the record the same way.
+        self.expands = expands
+        self.family = family
         self.entries: dict[str, MediaEntry] = {}
 
     @property
@@ -99,9 +107,13 @@ class MediaStore:
                 raise ValueError(f"unknown media reference {url}")
             return url
         if not self.enabled:
+            if self.processor is None:
+                raise ValueError("this session server cannot carry images: the model has no image processor")
             raise ValueError(
-                "this session server cannot carry images: the model has no image processor "
-                "or the TITO tokenizer family has no image placeholder token"
+                f"this session server cannot carry images: TITO family {self.family or 'default'} has no "
+                "entry in the image-token table (ImageTokens in "
+                "miles.utils.chat_template_utils.tito_tokenizer); add the family's begin marker, "
+                "placeholder and end marker there"
             )
         media_type, data = _decode_data_url(url)
         if not media_type.startswith("image/"):
