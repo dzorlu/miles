@@ -113,9 +113,17 @@ class SessionCoreV2(SessionCore):
         session = self.registry.get_session(session_id)
         started = time.perf_counter()
         async with session.lock:
-            response = await asyncio.to_thread(
-                self._collect_samples_sync, session_id, session, max_seq_len, agent_metadata
+            worker = asyncio.ensure_future(
+                asyncio.to_thread(self._collect_samples_sync, session_id, session, max_seq_len, agent_metadata)
             )
+            try:
+                response = await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                # The client went away (timeout, disconnect). A thread cannot
+                # be cancelled and keeps reading the tree, so the lock stays
+                # held until it ends; a chat commit of this session waits.
+                await asyncio.wait({worker})
+                raise
         latest = session.latest()
         logger.info(
             "samples op: session=%s status=%s tokens=%d nodes=%d %.1fs off the event loop",
