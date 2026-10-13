@@ -31,6 +31,8 @@ class SessionServerConfig(FrozenStrictBaseModel):
     rollout_top_logprobs_num: int
     rollout_sampling_logprobs_mode: str
     rollout_temperature: float
+    # Share of sessions whose samples op computes tito_session_mismatch (0 = never).
+    tito_session_mismatch_rate: float = 0.0
 
 
 def compute_session_server_config(
@@ -60,6 +62,7 @@ def compute_session_server_config(
         session_message_matcher=getattr(args, "session_message_matcher", "strict"),
         pause_generation_mode=getattr(args, "pause_generation_mode", None),
         session_sample_picker_path=getattr(args, "session_sample_picker_path", None),
+        tito_session_mismatch_rate=getattr(args, "tito_session_mismatch_rate", 0.0),
         session_sample_postprocessor_path=getattr(args, "session_sample_postprocessor_path", None),
         rollout_top_logprobs_num=args.rollout_top_logprobs_num,
         rollout_sampling_logprobs_mode=args.rollout_sampling_logprobs_mode,
