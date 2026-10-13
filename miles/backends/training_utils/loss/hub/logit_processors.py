@@ -9,6 +9,7 @@ from miles.backends.training_utils.data.context_parallel import (
     iter_local_response_rows,
 )
 from miles.backends.training_utils.data.sampling_mask import build_local_sampling_mask
+from miles.backends.training_utils.loss.hub.context_parallel_logits import ContextParallelLogits
 from miles.backends.training_utils.loss.hub.math_utils import calculate_log_probs_and_entropy
 from miles.backends.training_utils.loss.hub.score_centering import selected_log_probs_and_entropy
 from miles.backends.training_utils.parallel import get_parallel_state
@@ -48,6 +49,16 @@ def _local_response_layout(
         include_response_indices=include_response_indices,
     )
     return flat_logits, layout
+
+
+def _true_on_policy_logits(logits: torch.Tensor, args: Namespace) -> torch.Tensor:
+    if logits.size(-1) > 1 and args.rollout_temperature > 0 and args.rollout_temperature != 1.0:
+        logits = logits.div(args.rollout_temperature)
+    if getattr(args, "bf16", False):
+        return logits.to(torch.bfloat16)
+    if getattr(args, "fp16", False):
+        return logits.to(torch.float16)
+    return logits
 
 
 def _iter_response_chunks(
@@ -95,12 +106,7 @@ def _iter_response_chunks(
     )
 
     if args.true_on_policy_mode:
-        if logits.size(-1) > 1 and args.rollout_temperature > 0 and args.rollout_temperature != 1.0:
-            logits = logits.div(args.rollout_temperature)
-        if getattr(args, "bf16", False):
-            logits = logits.to(torch.bfloat16)
-        elif getattr(args, "fp16", False):
-            logits = logits.to(torch.float16)
+        logits = _true_on_policy_logits(logits, args)
 
     for row_ranges, tokens_chunk, response_indices in layout:
         pieces = [logits[row_start:row_end] for row_start, row_end in row_ranges]
@@ -172,6 +178,19 @@ def get_log_probs_and_entropy(
         a list of `[R]` tensors.
     """
     assert non_loss_data
+    if isinstance(logits, ContextParallelLogits):
+        if rollout_sampling_mask is not None or getattr(args, "loss_type", None) == "score_centering":
+            raise NotImplementedError(
+                "context-parallel-local log-probs support neither sampling masks nor score centering"
+            )
+        return _context_parallel_log_probs_and_entropy(
+            logits,
+            args=args,
+            total_lengths=total_lengths,
+            response_lengths=response_lengths,
+            with_entropy=with_entropy,
+            entropy_requires_grad=entropy_requires_grad,
+        )
     if rollout_sampling_mask is not None:
         for sample_index, (sampling_mask, response_length) in enumerate(
             zip(rollout_sampling_mask, response_lengths, strict=True)
@@ -344,6 +363,66 @@ def _fused_log_probs_and_entropy(
     res = {"log_probs": list(log_probs.split(lengths))}
     if with_entropy:
         res["entropy"] = list(entropy.split(lengths))
+    return res
+
+
+def _context_parallel_log_probs_and_entropy(
+    logits: ContextParallelLogits,
+    *,
+    args: Namespace,
+    total_lengths: list[int],
+    response_lengths: list[int],
+    with_entropy: bool,
+    entropy_requires_grad: bool,
+) -> dict[str, list[torch.Tensor]]:
+    """``get_log_probs_and_entropy`` on a CP shard: per-token values on the local rows, gathered as
+    ``[T]`` vectors, then sliced per response as the ``cp_size == 1`` path slices the logits.
+    ``--log-probs-backend`` picks the per-token op as on the gathered path."""
+    assert args.qkv_format == "thd" and not args.allgather_cp, "CP-local log-probs need packed thd batches"
+    local = logits.local.squeeze(0)
+    if args.log_probs_backend == "fused":
+        # imported here: the op needs triton, which not every host that imports the losses has
+        from miles.backends.training_utils.loss.hub.fused_log_probs import fused_log_probs_and_entropy
+
+        log_prob, entropy = fused_log_probs_and_entropy(
+            local,
+            torch.arange(local.size(0), device=local.device),
+            logits.targets,
+            tp_group=get_parallel_state().tp.group,
+            vocab_size=getattr(args, "vocab_size", None),
+            temperature=args.rollout_temperature,
+            with_entropy=with_entropy,
+            entropy_requires_grad=entropy_requires_grad,
+            # the checkpointed loss replays its forward on these logits during backward
+            inplace_backward=not args.recompute_loss_function,
+        )
+    else:
+        if args.true_on_policy_mode:
+            local = _true_on_policy_logits(local, args)
+        log_prob, entropy = calculate_log_probs_and_entropy(
+            local,
+            logits.targets,
+            get_parallel_state().tp.group,
+            with_entropy=with_entropy,
+            entropy_requires_grad=entropy_requires_grad,
+            chunk_size=args.log_probs_chunk_size,
+            true_on_policy=args.true_on_policy_mode,
+            vocab_size=getattr(args, "vocab_size", None),
+            temperature=1.0 if args.true_on_policy_mode else args.rollout_temperature,
+            debug_unified_grad_fused_logprob=args.debug_unified_grad_fused_logprob,
+        )
+        log_prob = log_prob.squeeze(-1)
+    per_token = {"log_probs": logits.gather_rows(log_prob)}
+    if with_entropy:
+        per_token["entropy"] = logits.gather_rows(entropy)
+
+    res = {key: [] for key in per_token}
+    end = 0
+    for total_length, response_length in zip(total_lengths, response_lengths, strict=True):
+        end += total_length
+        start = end - response_length
+        for key, values in per_token.items():
+            res[key].append(values[start - 1 : end - 1])
     return res
 
 
