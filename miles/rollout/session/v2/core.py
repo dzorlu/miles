@@ -119,6 +119,11 @@ class SessionCoreV2(SessionCore):
             cancelled = False
             while True:
                 try:
+                    if cancelled:
+                        # Wait without consuming the result: the caller gets
+                        # its cancellation, not the build's outcome.
+                        await asyncio.wait({worker})
+                        break
                     response = await asyncio.shield(worker)
                     break
                 except asyncio.CancelledError:
@@ -127,9 +132,13 @@ class SessionCoreV2(SessionCore):
                     # lock stays held until it ends, however many cancels
                     # arrive; a chat commit of this session waits.
                     cancelled = True
-                    if worker.done():
-                        break
             if cancelled:
+                if worker.done() and not worker.cancelled() and worker.exception() is not None:
+                    logger.warning(
+                        "samples op for session %s failed after its request was cancelled: %r",
+                        session_id,
+                        worker.exception(),
+                    )
                 raise asyncio.CancelledError()
         latest = session.latest()
         logger.info(
