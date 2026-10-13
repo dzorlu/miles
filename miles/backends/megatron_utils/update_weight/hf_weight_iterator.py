@@ -2,6 +2,7 @@
 HF weight iterator API."""
 
 import json
+import logging
 import math
 import os
 from abc import abstractmethod
@@ -20,6 +21,8 @@ from miles.backends.training_utils.weight_update.hf_weight_iterator.checkpoint_t
     mm_tower_names,
 )
 from miles.utils.lora.utils import is_lora_weight_name
+
+logger = logging.getLogger(__name__)
 
 
 class MegatronHfWeightIteratorBase(HfWeightIteratorBase):
@@ -140,4 +143,11 @@ def _iter_mm_tower_units(args, *, materialize):
     towers = mm_tower_names(args)
     if not towers:
         return
-    yield from iter_checkpoint_tower_units(args.hf_checkpoint, materialize=materialize, towers=towers)
+    count = 0
+    for unit in iter_checkpoint_tower_units(args.hf_checkpoint, materialize=materialize, towers=towers):
+        count += len(unit)
+        yield unit
+    if materialize:
+        logger.info(
+            "mm tower sync: re-sent %d tower tensor(s) for towers=%s from %s", count, list(towers), args.hf_checkpoint
+        )
