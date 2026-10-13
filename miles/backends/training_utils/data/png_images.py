@@ -55,9 +55,12 @@ def image_processor() -> Any:
 
 
 def load_image_processor(hf_checkpoint: str) -> Any:
-    from transformers import AutoProcessor
+    """The checkpoint's image processor through ``load_processor``, which
+    also knows the engine's processor for a model transformers cannot
+    resolve (GLM-5.3 on a transformers without ``glm5_next``)."""
+    from miles.utils.processing_utils import load_processor
 
-    processor = AutoProcessor.from_pretrained(hf_checkpoint, trust_remote_code=True)
+    processor = load_processor(hf_checkpoint, trust_remote_code=True)
     found = getattr(processor, "image_processor", None)
     if found is None:
         raise RuntimeError(f"{hf_checkpoint}: AutoProcessor has no image_processor to rebuild images with")

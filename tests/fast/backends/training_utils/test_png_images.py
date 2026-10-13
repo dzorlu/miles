@@ -102,3 +102,17 @@ def test_configure_resets_the_processor_when_the_checkpoint_changes(monkeypatch)
     assert png_images._image_processor is not None
     png_images.configure("b")
     assert png_images._image_processor is None and png_images._hf_checkpoint == "b"
+
+
+def test_the_processor_comes_from_load_processor(monkeypatch):
+    """load_processor knows the engine's processor for a model transformers cannot resolve."""
+    from miles.utils import processing_utils
+
+    class Proc:
+        image_processor = object()
+
+    monkeypatch.setattr(processing_utils, "load_processor", lambda path, **kw: Proc())
+    assert png_images.load_image_processor("/any") is Proc.image_processor
+    monkeypatch.setattr(processing_utils, "load_processor", lambda path, **kw: None)
+    with pytest.raises(RuntimeError, match="no image_processor"):
+        png_images.load_image_processor("/any")

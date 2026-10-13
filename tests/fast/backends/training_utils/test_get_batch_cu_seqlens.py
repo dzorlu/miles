@@ -36,3 +36,29 @@ def test_the_host_cu_seqlens_match_the_device_tensor(
             allgather_cp=allgather_cp,
         )
         assert batch["cu_seqlens_host"] == tuple(batch["cu_seqlens"].tolist())
+
+
+def test_get_batch_rebuilds_pngs_only_when_the_batch_moves_to_the_device(monkeypatch: pytest.MonkeyPatch):
+    """A model that keeps multimodal inputs on the host (torchtitan's image
+    encoder) rebuilds the PNG bytes itself; the others get pixel_values here."""
+    from miles.backends.training_utils.data import png_images
+
+    calls = []
+    monkeypatch.setattr(png_images, "rebuild_png_images", lambda mm: (calls.append(sorted(mm)), {**mm, "pixel_values": torch.zeros(1, 3)})[1])
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(torch.Tensor, "cuda", lambda self, *args, **kwargs: self)
+    state = SimpleNamespace(cp=SimpleNamespace(rank=0, size=1), tp=SimpleNamespace(rank=0, size=1))
+    monkeypatch.setattr(data_utils, "get_parallel_state", lambda: state)
+    monkeypatch.setattr(context_parallel, "get_parallel_state", lambda: state)
+    rollout = {
+        "tokens": [torch.arange(1, 4)],
+        "loss_masks": [torch.ones(1, dtype=torch.int)],
+        "total_lengths": [3],
+        "response_lengths": [1],
+        "multimodal_train_inputs": [{"image_png": torch.zeros(4, dtype=torch.uint8), "image_png_lengths": torch.tensor([4]), "image_grid_thw": torch.tensor([[1, 1, 1]])}],
+    }
+    keys = ["tokens", "loss_masks", "total_lengths", "response_lengths", "multimodal_train_inputs"]
+    on_host = data_utils.get_batch(data_utils.DataIterator(rollout, micro_batch_size=1), keys, multimodal_on_host=True)
+    assert calls == [] and "image_png" in on_host["multimodal_train_inputs"]
+    moved = data_utils.get_batch(data_utils.DataIterator(rollout, micro_batch_size=1), keys, multimodal_on_host=False)
+    assert calls == [["image_grid_thw", "image_png", "image_png_lengths"]] and "pixel_values" in moved["multimodal_train_inputs"]

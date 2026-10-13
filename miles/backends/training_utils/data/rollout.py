@@ -373,8 +373,11 @@ def get_batch(
                     else:
                         multimodal_data[key] = torch.cat([multimodal_data[key], mm_tensor], dim=0)
                         multimodal_num_items[key].append(mm_tensor.size(0))
-        multimodal_data = png_images.rebuild_png_images(multimodal_data)
         if not multimodal_on_host:
+            # A model that keeps its multimodal inputs on the host encodes the
+            # PNG bytes itself (torchtitan's image encoder); the others get
+            # pixel_values rebuilt here, before the device move.
+            multimodal_data = png_images.rebuild_png_images(multimodal_data)
             multimodal_data = {
                 key: tensor.to(device=torch.cuda.current_device()) for key, tensor in multimodal_data.items()
             }
