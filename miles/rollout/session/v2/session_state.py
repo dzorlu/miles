@@ -28,6 +28,7 @@ from typing import Any
 from miles.rollout.session.config import SessionServerConfig
 from miles.rollout.session.errors import MessageValidationError, TokenizationError, TruncatedGenerationError
 from miles.rollout.session.linear_trajectory import SessionRegistry, assert_pretokenized_prefix
+from miles.rollout.session.media import MediaStore
 from miles.rollout.session.request_args import PreparedChatRequest, prepare_chat_request
 from miles.rollout.session.store_refs import SessionStoreRefs
 from miles.rollout.session.types import SessionRecord
@@ -55,6 +56,8 @@ class SessionStateV2:
     sampling_defaults: dict[str, Any] = field(default_factory=dict)
     sampling_support_replay: bool = False
     extra_key: str | None = None
+    # The session's images (miles.rollout.session.media); None on a text-only server.
+    media: MediaStore | None = field(default=None, repr=False, compare=False)
 
     def snapshot(self) -> "SessionStateV2":
         """Capture the committed tree for collection. Caller holds the lock."""
@@ -239,6 +242,7 @@ class SessionRegistryV2(SessionRegistry):
             sampling_defaults=dict(sampling_defaults or {}),
             sampling_support_replay=sampling_support_replay,
             extra_key=extra_key,
+            media=self.new_media_store(),
         )
         return session_id
 

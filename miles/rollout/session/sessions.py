@@ -51,7 +51,7 @@ from miles.utils.chat_template_utils.message_matcher_hub import (
     resolve_session_message_matcher,
 )
 from miles.utils.output_store.config import connect_output_store
-from miles.utils.processing_utils import load_tokenizer
+from miles.utils.processing_utils import load_processor, load_tokenizer
 
 logger = logging.getLogger(__name__)
 
@@ -82,13 +82,24 @@ def setup_session_routes(app, backend, config: SessionServerConfig, *, use_addit
         if config.output_store_backend_config is None
         else connect_output_store(config.output_store_backend_config)
     )
+    # The image processor of a vision model (None for a text model): the
+    # sessions count and grid their images with it (miles.rollout.session.media).
+    processor = load_processor(config.hf_checkpoint, trust_remote_code=True)
+    if processor is not None and tito_tokenizer.image_pad_id() is None:
+        logger.info(
+            "[session] %s has an image processor but TITO family %r has no image placeholder; images are refused",
+            config.hf_checkpoint,
+            config.tito_model,
+        )
 
     use_v2 = config.use_session_server == "v2"
     if use_v2:
         from miles.rollout.session.v2.core import SessionCoreV2
         from miles.rollout.session.v2.session_state import SessionRegistryV2
 
-        registry = SessionRegistryV2(tokenizer, tito_tokenizer=tito_tokenizer, message_matcher=message_matcher)
+        registry = SessionRegistryV2(
+            tokenizer, tito_tokenizer=tito_tokenizer, message_matcher=message_matcher, processor=processor
+        )
         core = SessionCoreV2(
             backend,
             registry,
@@ -98,7 +109,9 @@ def setup_session_routes(app, backend, config: SessionServerConfig, *, use_addit
             output_store=output_store,
         )
     else:
-        registry = SessionRegistry(tokenizer, tito_tokenizer=tito_tokenizer, message_matcher=message_matcher)
+        registry = SessionRegistry(
+            tokenizer, tito_tokenizer=tito_tokenizer, message_matcher=message_matcher, processor=processor
+        )
         core = SessionCore(
             backend,
             registry,
