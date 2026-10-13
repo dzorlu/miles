@@ -157,6 +157,41 @@ class _RecordingRunner:
         return SimpleNamespace(grad_norm=0.0, extra_metrics={})
 
 
+@pytest.mark.parametrize("per_token", [True, False])
+def test_each_optimizer_step_hands_its_global_token_count_to_the_loss(monkeypatch, per_token):
+    """The count is taken once per step, before that step's micro-batches are fetched."""
+    events = []
+    counts = iter([torch.tensor(7), torch.tensor(11)])
+
+    def _count(data_iterator, num_microbatches, *, group):
+        events.append(("count", num_microbatches, group))
+        return next(counts)
+
+    monkeypatch.setattr(base_module, "_global_loss_tokens", _count)
+    state = SimpleNamespace(intra_dp=SimpleNamespace(group="dp"), is_metrics_rank=False)
+    monkeypatch.setattr(base_module, "get_parallel_state", lambda: state)
+    monkeypatch.setattr(base_module.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(base_module, "log_train_step", lambda **kwargs: None)
+    monkeypatch.setattr(base_module, "aggregate_train_losses", lambda losses, num_rollouts=None: {})
+    monkeypatch.setattr(
+        TorchNativeTrainRayActor,
+        "_fetch_batches",
+        lambda self, progress, it, keys: (events.append(("fetch",)) or [{} for _ in progress]),
+    )
+    actor = _Provider()
+    actor.args.calculate_per_token_loss = per_token
+    runner = _RecordingRunner()
+
+    actor._optimizer_steps(runner, _DataIterator(), [2, 3], rollout_id=0)
+
+    if per_token:
+        assert events == [("count", 2, "dp"), ("fetch",), ("count", 3, "dp"), ("fetch",)]
+        assert [closure.args[1:] for closure in runner.closures] == [(2, torch.tensor(7)), (3, torch.tensor(11))]
+    else:
+        assert events == [("fetch",), ("fetch",)]
+        assert [closure.args[1:] for closure in runner.closures] == [(2, None), (3, None)]
+
+
 def test_the_rollout_step_hands_the_stamped_rollout_counts_to_the_optimizer_steps(step):
     actor = _Provider()
 
@@ -171,6 +206,7 @@ def test_each_optimizer_step_hands_its_rollout_count_to_the_loss_and_the_metrics
     per-sample loss, as in the Megatron actor."""
     metric_counts = []
     state = SimpleNamespace(intra_dp=SimpleNamespace(group="dp"), is_metrics_rank=False)
+    monkeypatch.setattr(base_module, "_global_loss_tokens", lambda *args, **kwargs: torch.tensor(1))
     monkeypatch.setattr(base_module, "get_parallel_state", lambda: state)
     monkeypatch.setattr(base_module.dist, "get_rank", lambda: 0)
     monkeypatch.setattr(base_module, "log_train_step", lambda **kwargs: None)

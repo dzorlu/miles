@@ -14,6 +14,7 @@ from miles.backends.training_utils.data.rollout import DataIterator, get_batch, 
 from miles.backends.training_utils.data.sampling_mask import get_rollout_sampling_masks
 from miles.backends.training_utils.loss.objective import (
     compute_advantages_and_returns,
+    count_loss_tokens,
     get_log_probs_and_entropy,
     loss_function,
 )
@@ -264,9 +265,14 @@ class TorchNativeTrainRayActor(TrainRayActor):
             runner.zero_grad()
             progress = tqdm(range(microbatches), desc="actor_train", disable=dist.get_rank() != 0)
             step_num_rollouts = None if num_rollouts is None else num_rollouts[step_id]
+            global_num_tokens = (
+                _global_loss_tokens(data_iterator, microbatches, group=state.intra_dp.group)
+                if args.calculate_per_token_loss
+                else None
+            )
             batches = self._fetch_batches(self.prof.iterate_train_actor(progress), data_iterator, keys)
             losses_reduced = runner.forward_backward_step(
-                batches, partial(_step_loss, args, microbatches, num_rollouts=step_num_rollouts)
+                batches, partial(_step_loss, args, microbatches, global_num_tokens, num_rollouts=step_num_rollouts)
             )
             metrics = runner.apply_step()
 
@@ -317,8 +323,26 @@ class TorchNativeTrainRayActor(TrainRayActor):
         return self.weight_updater.weight_version
 
 
+def _global_loss_tokens(data_iterator: DataIterator, num_microbatches: int, *, group) -> torch.Tensor:
+    """The loss-token count of one optimizer step over all DP ranks, the divisor Megatron applies
+    when it finalizes grads under --calculate-per-token-loss. Counted once per step, before its
+    micro-batches run, so the loss needs no collective per micro-batch."""
+    loss_masks = [
+        mask for batch in data_iterator.peek(["loss_masks"], num_microbatches) for mask in batch["loss_masks"]
+    ]
+    num_tokens = count_loss_tokens(loss_masks)
+    dist.all_reduce(num_tokens, group=group)
+    return num_tokens
+
+
 def _step_loss(
-    args, num_microbatches: int, logits: torch.Tensor, batch: dict, *, num_rollouts: int | None = None
+    args,
+    num_microbatches: int,
+    global_num_tokens: torch.Tensor | None,
+    logits: torch.Tensor,
+    batch: dict,
+    *,
+    num_rollouts: int | None = None,
 ) -> tuple[torch.Tensor, dict]:
     loss, _normalizer, log_dict = loss_function(
         args=args,
@@ -327,5 +351,6 @@ def _step_loss(
         logits=logits,
         apply_megatron_loss_scaling=False,
         num_rollouts=num_rollouts,
+        global_num_tokens=global_num_tokens,
     )
     return loss, log_dict
