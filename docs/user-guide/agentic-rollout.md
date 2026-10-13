@@ -16,8 +16,7 @@ stateless `/generate` interface.
 
 <Warning>
 
-**No VLM support yet.** Currently the TITO session path cannot carry image or video inputs. For vision-language models, use the
-[Generate Endpoint](/user-guide/generate-endpoint) path instead.
+**Images on the session path.** A chat request may carry images as data URLs (`image_url` parts). The server renders one image placeholder per image for the engine (the Qwen vision templates write `<|vision_start|><|image_pad|><|vision_end|>`), stores each distinct image once under a content hash, counts its tokens with the model's image processor, and when it builds the training samples expands the placeholders to that count and ships the images as PNG bytes in `multimodal_train_inputs` (`image_png`, `image_png_lengths`, `image_grid_thw`). The engine must run the request ids as sent (SGLang's exact-token path; the chat endpoint keeps the images when `input_ids` is set): the server checks the engine's reported prompt length against its expansion and refuses the sample otherwise. Video and audio inputs are not carried. Supported TITO families: the Qwen3 vision models (`image_pad_token`).
 
 </Warning>
 
