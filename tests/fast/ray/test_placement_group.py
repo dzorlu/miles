@@ -5,7 +5,9 @@ from argparse import Namespace
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+import ray
 from tests.fast.fixtures.args_fixtures import parser_defaults
 from tests.fast.fixtures.capability_fixtures import FakeBackendCapability
 from tests.fast.fixtures.megatron_config_fixtures import write_megatron_config, write_megatron_config_trainers
@@ -472,6 +474,59 @@ class TestUpdateWeights:
         )
 
         assert [payload["rollout_id"] for payload in logged] == [6]
+
+    async def test_an_engine_that_drops_the_checksum_request_does_not_end_the_run(self, monkeypatch, caplog):
+        """The checksum is audit evidence: one of 32 engines closing its connection during the post-sync
+        checksum ended a 4-node run at step 3, with the weights already published to every engine."""
+        from miles.ray.placement_group import update_weights
+
+        actor_model, rollout_executor = self._fakes(weight_version=7)
+        dropped = ray.exceptions.RayTaskError(
+            "InferenceController.check_weights", "", cause=httpx.ReadError("")
+        ).as_instanceof_cause()
+        inference_controller = MagicMock(
+            start_update_weights=AsyncMock(),
+            end_update_weights=AsyncMock(),
+            check_weights=AsyncMock(side_effect=dropped),
+        )
+        logged = self._record_checksum_events(monkeypatch)
+
+        with caplog.at_level(logging.WARNING, logger="miles.ray.placement_group"):
+            await update_weights(
+                self._checksum_args(start_rollout_id=5),
+                actor_model,
+                rollout_executor,
+                inference_controller,
+                rollout_id=6,
+            )
+
+        assert logged == []
+        rollout_executor.set_weight_version.assert_awaited_once_with(7, trainer_model_id=None)
+        assert "checksum skipped for rollout 6" in caplog.text
+        assert "ReadError" in caplog.text
+
+    async def test_an_engine_that_answers_the_checksum_with_an_error_still_ends_the_run(self, monkeypatch):
+        """Only a dropped connection is forgiven; an engine that reports a failure keeps failing loudly."""
+        from miles.ray.placement_group import update_weights
+
+        actor_model, rollout_executor = self._fakes(weight_version=7)
+        inference_controller = MagicMock(
+            start_update_weights=AsyncMock(),
+            end_update_weights=AsyncMock(),
+            check_weights=AsyncMock(side_effect=RuntimeError("engine reported a checksum failure")),
+        )
+        self._record_checksum_events(monkeypatch)
+
+        with pytest.raises(RuntimeError, match="engine reported a checksum failure"):
+            await update_weights(
+                self._checksum_args(start_rollout_id=5),
+                actor_model,
+                rollout_executor,
+                inference_controller,
+                rollout_id=6,
+            )
+
+        rollout_executor.set_weight_version.assert_not_awaited()
 
     async def test_a_trainer_that_skipped_the_broadcast_publishes_nothing(self):
         """--debug-skip-weight-update leaves the engines on their old weights, so the version must not move."""

@@ -3,6 +3,7 @@ import logging
 import socket
 from typing import NamedTuple
 
+import httpx
 import ray
 from ray.util.placement_group import PlacementGroup, placement_group
 from ray.util.scheduling_strategies import PlacementGroupSchedulingStrategy
@@ -332,7 +333,19 @@ async def _maybe_log_inference_engine_weight_checksums(
     if args.debug_train_only or args.debug_rollout_only:
         return
 
-    check_weights_result = await inference_controller.check_weights(action="checksum", model_id=trainer_model_id)
+    try:
+        check_weights_result = await inference_controller.check_weights(action="checksum", model_id=trainer_model_id)
+    except httpx.TransportError as exc:
+        # The checksum is audit evidence for the event log. The weights were already published, so one
+        # engine closing its connection mid-reply (surfacing as a RayTaskError that also subclasses the
+        # httpx error) must not end the run; this rollout's event is skipped and training continues.
+        logger.warning(
+            "inference engine weight checksum skipped for rollout %s: an engine dropped the request (%s: %s)",
+            args.start_rollout_id - 1 if rollout_id is None else rollout_id,
+            type(exc).__name__,
+            exc,
+        )
+        return
     if not check_weights_result:
         return
     engine_checksums = flatten_inference_engine_checksums(check_weights_result)
