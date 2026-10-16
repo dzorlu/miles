@@ -236,3 +236,49 @@ def test_a_rollout_count_per_optimizer_step_is_required():
 def test_the_train_keys_carry_the_rollout_mask_sums():
     """Without them every sample of a split rollout is its own token mean."""
     assert "rollout_mask_sums" in base_module.TRAIN_KEYS
+
+
+class TestPublishedWeightVersion:
+    @pytest.mark.parametrize("completed", [False, True])
+    @pytest.mark.parametrize("previous_version", [0, 3])
+    def test_only_completed_transfers_advance_the_published_version(
+        self, monkeypatch: pytest.MonkeyPatch, completed: bool, previous_version: int
+    ) -> None:
+        """A skipped transfer preserves the last published ordinal and its verification target."""
+        actor = _Provider()
+        actor.args.debug_train_only = False
+        actor.args.ci_test = True
+        actor._published_weight_version = previous_version
+        actor.weight_updater = MagicMock()
+        actor.weight_updater.update_weights.return_value = completed
+        info = SimpleNamespace(rollout_engines=[object()])
+        monkeypatch.setattr(base_module, "print_memory", lambda message: None)
+        monkeypatch.setattr(base_module, "clear_memory", lambda: None)
+
+        result = TorchNativeTrainRayActor.update_weights.__wrapped__(actor, info)
+
+        expected_version = previous_version + int(completed)
+        assert result == expected_version
+        assert actor._published_weight_version == expected_version
+        actor.weight_updater.update_weights.assert_called_once_with(weight_version=previous_version + 1)
+        if expected_version:
+            actor.weight_updater.verify_engine_version.assert_called_once_with(
+                info.rollout_engines, weight_version=expected_version
+            )
+        else:
+            actor.weight_updater.verify_engine_version.assert_not_called()
+
+    def test_failed_transfer_keeps_the_previous_published_version(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A failed transfer cannot consume an ordinal or verify unpublished weights."""
+        actor = _Provider()
+        actor.args.debug_train_only = False
+        actor._published_weight_version = 3
+        actor.weight_updater = MagicMock()
+        actor.weight_updater.update_weights.side_effect = RuntimeError("transfer failed")
+        monkeypatch.setattr(base_module, "print_memory", lambda message: None)
+
+        with pytest.raises(RuntimeError, match="transfer failed"):
+            TorchNativeTrainRayActor.update_weights.__wrapped__(actor, SimpleNamespace(rollout_engines=[]))
+
+        assert actor._published_weight_version == 3
+        actor.weight_updater.verify_engine_version.assert_not_called()

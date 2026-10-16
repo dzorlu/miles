@@ -108,3 +108,35 @@ def test_sample_keeps_the_expanded_prompt_ids():
     sample = Sample()
     asyncio.run(update_sample_from_response(_args(), sample, payload=payload, output=output))
     assert sample.tokens == payload["input_ids"] + [7, 8]
+
+
+
+def _make_args() -> SimpleNamespace:
+    return SimpleNamespace(
+        rollout_max_response_len=16,
+        rollout_max_context_len=None,
+        use_rollout_routing_replay=False,
+        use_rollout_indexer_replay=False,
+        use_sampling_support_replay=False,
+        rollout_top_logprobs_num=0,
+        lora_rank=0,
+        lora_adapter_path=None,
+    )
+
+
+class TestComputeRequestPayloadExtraKey:
+    def test_no_extra_key_leaves_the_payload_without_one(self):
+        """Without an extra key the payload has no extra_key field at all."""
+        payload, halt_status = compute_request_payload(_make_args(), input_ids=[1, 2], sampling_params={})
+
+        assert halt_status is None
+        assert "extra_key" not in payload
+
+    def test_an_extra_key_reaches_the_payload_verbatim(self):
+        """The extra key is forwarded unchanged to the engine request."""
+        payload, halt_status = compute_request_payload(
+            _make_args(), input_ids=[1, 2], sampling_params={}, kv_cache_namespace="train:-:7"
+        )
+
+        assert halt_status is None
+        assert payload["extra_key"] == "train:-:7"

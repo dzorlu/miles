@@ -9,6 +9,7 @@ from .inkling import InklingBridge
 from .joyai_llm_flash import JoyAILLMFlashBridge
 from .kimi_k3 import KimiK3Bridge
 from .mimo import MimoBridge
+from .muse_spark import MuseSpark1xBridge
 from .qwen3_5 import Qwen3_5Bridge
 from .qwen3_8_next import Qwen38NextBridge
 from .qwen3_next import Qwen3NextBridge
@@ -21,6 +22,7 @@ __all__ = [
     "Qwen3_5Bridge",
     "Qwen38NextBridge",
     "MimoBridge",
+    "MuseSpark1xBridge",
     "DeepseekV32Bridge",
     "Glm5NextBridge",
     "DeepseekV4Bridge",

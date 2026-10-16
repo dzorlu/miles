@@ -13,6 +13,7 @@ import logging
 import time
 from dataclasses import dataclass
 
+import orjson
 from starlette.responses import Response
 
 from miles.rollout.generate_utils.sample_utils import merge_samples
@@ -163,7 +164,8 @@ def extract_completion(result: dict) -> tuple:
     completion_token_ids)``; malformed upstream payloads raise
     ``UpstreamResponseError``.
     """
-    response = json.loads(result["response_body"])
+    # orjson: every turn parses a multi-MB body (per-token logprobs, R3); SGLang writes it with orjson too.
+    response = orjson.loads(result["response_body"])
     choice = response.get("choices", [{}])[0]
     if choice.get("finish_reason") == "abort":
         raise UpstreamGenerationAbortedError("upstream generation aborted before completion")
@@ -218,12 +220,13 @@ def store_request_media(client_args: dict, media: MediaStore | None) -> dict:
 def engine_request_body(request_body: dict, media: MediaStore | None) -> bytes:
     """The proxied body: the stored ``mm://`` references become the client's
     data URLs again, so the engine receives the images with the ids."""
+    # orjson: the body carries the whole prompt's input_ids on every turn.
     if media is None:
-        return json.dumps(request_body).encode()
+        return orjson.dumps(request_body)
     messages = request_body.get("messages")
     if isinstance(messages, list) and media_references(messages):
         request_body = {**request_body, "messages": restore_messages(messages, media)}
-    return json.dumps(request_body).encode()
+    return orjson.dumps(request_body)
 
 
 class SessionCore:
@@ -259,10 +262,10 @@ class SessionCore:
         if not (self.use_addition_r3 and request_body.get("return_routed_experts")):
             return
         previous_rows = max(0, len(checkpoint_token_ids) - 1)
-        stable_prefix_tokens = _lcp_len(checkpoint_token_ids, prompt_token_ids)
-        assert (
-            stable_prefix_tokens >= previous_rows
-        ), f"additional R3 requires {previous_rows} stable prefix tokens, got {stable_prefix_tokens}"
+        assert prompt_token_ids[:previous_rows] == checkpoint_token_ids[:previous_rows], (
+            f"additional R3 requires {previous_rows} stable prefix tokens, "
+            f"got {_lcp_len(checkpoint_token_ids, prompt_token_ids)}"
+        )
         request_body["routed_experts_start_len"] = previous_rows
 
     async def health(self) -> Response:
@@ -271,11 +274,14 @@ class SessionCore:
             body["session_server_instance_id"] = self.instance_id
         return Response(content=_render_json(body), status_code=200, media_type=JSON_MEDIA_TYPE)
 
-    async def create_session(self, *, evaluation: bool = False, sampling_defaults: dict | None = None) -> Response:
+    async def create_session(
+        self, *, evaluation: bool = False, sampling_defaults: dict | None = None, extra_key: str | None = None
+    ) -> Response:
         session_id = self.registry.create_session(
             evaluation=evaluation,
             sampling_defaults=sampling_defaults,
             sampling_support_replay=not evaluation and self.config.use_sampling_support_replay,
+            extra_key=extra_key,
         )
         return Response(content=_render_json({"session_id": session_id}), status_code=200, media_type=JSON_MEDIA_TYPE)
 
