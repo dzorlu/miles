@@ -13,6 +13,7 @@ import pytest
 from miles.utils.chat_template_utils import get_tito_tokenizer
 from miles.utils.chat_template_utils.tito_tokenizer import (
     GLM_V_IMAGE_TOKENS,
+    MUSE_SPARK_IMAGE_TOKENS,
     QWEN3_VL_IMAGE_TOKENS,
     ImageTokens,
     TITOTokenizer,
@@ -29,6 +30,7 @@ VISION_FAMILIES = {
     TITOTokenizerType.QWEN38_SMALL: QWEN3_VL_IMAGE_TOKENS,
     TITOTokenizerType.QWEN4_EXP: QWEN3_VL_IMAGE_TOKENS,
     TITOTokenizerType.GLM53: GLM_V_IMAGE_TOKENS,
+    TITOTokenizerType.MUSE_SPARK: MUSE_SPARK_IMAGE_TOKENS,
 }
 
 
