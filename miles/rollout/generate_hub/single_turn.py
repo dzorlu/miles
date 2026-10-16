@@ -6,8 +6,9 @@ from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_utils.generate_endpoint_utils import (
     compute_prompt_ids_from_sample,
     compute_request_payload,
-    image_pad_id_for,
     compute_routing_headers,
+    image_pad_id_for,
+    images_expanded_on_wire,
     update_sample_from_response,
 )
 from miles.utils.http_utils import post
@@ -42,6 +43,7 @@ async def generate(input: GenerateFnInput, url: str | None = None) -> GenerateFn
         multimodal_inputs=sample.multimodal_inputs,
         evaluation=input.evaluation,
         image_pad_id=image_pad_id_for(input.state),
+        collapse_images=not images_expanded_on_wire(input.state),
         kv_cache_namespace=sample.kv_cache_namespace,
     )
     if payload is None:

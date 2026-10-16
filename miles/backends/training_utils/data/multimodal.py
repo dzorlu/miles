@@ -204,8 +204,8 @@ def _validate_muse_spark_rollout_data(rollout_data: RolloutBatch) -> None:
     """Muse Spark omni: tokens were expanded by the processor, so nothing changes here.
 
     Check the contract the tower wrapper relies on: one <|patch|> position per image
-    token (sum of gh*gw / downsample^2), all inside the prompt, and one patch row per
-    vision patch.
+    token (sum of gh*gw / downsample^2), none of them a trained token, and one patch
+    row per vision patch (after the PNG rebuild for session samples).
     """
     for i, (token_tensor, loss_mask, mm) in enumerate(
         zip(rollout_data["tokens"], rollout_data["loss_masks"], rollout_data["multimodal_train_inputs"], strict=False)
@@ -217,15 +217,22 @@ def _validate_muse_spark_rollout_data(rollout_data: RolloutBatch) -> None:
         tokens = sum(gh * gw // 4 for gh, gw in grids)
         positions = mm["mm_vision_positions"]
         prompt_len = len(token_tensor) - len(loss_mask)
+        # session samples ship PNG bytes; get_batch rebuilds the patch rows (png_images)
+        assert "mm_vision_patches" in mm or "image_png" in mm, f"sample {i}: no mm_vision_patches and no image_png"
         assert (
-            mm["mm_vision_patches"].shape[0] == patches
+            "mm_vision_patches" not in mm or mm["mm_vision_patches"].shape[0] == patches
         ), f"sample {i}: {mm['mm_vision_patches'].shape[0]} patch rows for grids {grids} ({patches} expected)"
         assert (
             positions.numel() == tokens
         ), f"sample {i}: {positions.numel()} <|patch|> positions but grids imply {tokens}"
-        assert (
-            positions.numel() == 0 or int(positions.max()) < prompt_len
-        ), f"sample {i}: Muse Spark image tokens must be in the prompt; found one in the response"
+        # Multi-turn session samples carry later screenshots inside the response, as observation
+        # tokens; the forward places image rows by position anywhere, but none may be a trained token.
+        in_response = positions[positions >= prompt_len] - prompt_len
+        if in_response.numel():
+            mask = torch.as_tensor(loss_mask, device=in_response.device)
+            assert not bool(
+                mask[in_response].any()
+            ), f"sample {i}: a Muse Spark image token in the response has loss_mask 1"
 
 
 def expand_multimodal_rollout_data_in_place(

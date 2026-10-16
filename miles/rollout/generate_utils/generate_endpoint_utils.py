@@ -42,6 +42,17 @@ def image_pad_id_for(state) -> int | None:
     return int(pad)
 
 
+def images_expanded_on_wire(state) -> bool:
+    """True when the TITO family's engine runs only expanded images
+    (``ImageTokens.expanded_on_wire``, Muse Spark): the request keeps the
+    processor's expanded ids instead of one placeholder per image."""
+    tokens = getattr(getattr(state, "tito_tokenizer", None), "image_tokens", None)
+    if tokens is not None:
+        return tokens.expanded_on_wire
+    # no TITO family (single-turn VLM runs): the Muse Spark train processor marks the model
+    return hasattr(getattr(state, "processor", None), "image_patches")
+
+
 def collapse_image_pads(input_ids: list[int], image_pad_id: int) -> list[int]:
     """``input_ids`` with every run of image placeholders reduced to one.
 
@@ -109,6 +120,7 @@ def compute_request_payload(
     *,
     evaluation: bool = False,
     image_pad_id: int | None = None,
+    collapse_images: bool = True,
     kv_cache_namespace: str | None = None,
 ) -> tuple[dict[str, Any] | None, Sample.Status | None]:
     """The ``/generate`` request for ``input_ids`` (the model's view: the
@@ -116,8 +128,9 @@ def compute_request_payload(
     request carries one placeholder per image (``collapse_image_pads``,
     ``image_pad_id`` from ``image_pad_id_for``); images without a known
     placeholder are refused rather than sent expanded, which the engine would
-    re-tokenize. The context arithmetic uses the expanded length, which is
-    what the engine runs."""
+    re-tokenize. ``collapse_images=False`` (``images_expanded_on_wire``)
+    sends the expanded ids as they are. The context arithmetic uses the
+    expanded length, which is what the engine runs."""
     sampling_params = deepcopy(sampling_params)
     max_new_tokens = sampling_params.pop("max_new_tokens", args.rollout_max_response_len)
     if x := args.rollout_max_context_len:
@@ -140,14 +153,15 @@ def compute_request_payload(
         payload["lora_path"] = LORA_ADAPTER_NAME
     if image_data := (multimodal_inputs or {}).get("images"):
         payload["image_data"] = [encode_image_for_rollout_engine(image) for image in image_data]
-        if image_pad_id is None:
-            raise ValueError(
-                "the sample carries images but no image placeholder is known for this model: the TITO "
-                "family has no entry in the image-token table (ImageTokens, "
-                "miles.utils.chat_template_utils.tito_tokenizer) and the processor names no image_token; "
-                "the engine would re-tokenize the prompt"
-            )
-        payload["input_ids"] = collapse_image_pads(input_ids, image_pad_id)
+        if collapse_images:
+            if image_pad_id is None:
+                raise ValueError(
+                    "the sample carries images but no image placeholder is known for this model: the TITO "
+                    "family has no entry in the image-token table (ImageTokens, "
+                    "miles.utils.chat_template_utils.tito_tokenizer) and the processor names no image_token; "
+                    "the engine would re-tokenize the prompt"
+                )
+            payload["input_ids"] = collapse_image_pads(input_ids, image_pad_id)
     if kv_cache_namespace is not None:
         payload["extra_key"] = kv_cache_namespace
 

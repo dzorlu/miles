@@ -422,6 +422,7 @@ class SessionRegistry:
             self.processor,
             pad_lookup() if callable(pad_lookup) else None,
             expands=tokens.expands if tokens is not None else True,
+            expanded_on_wire=tokens.expanded_on_wire if tokens is not None else False,
             family=type(tito).__name__ if tito is not None else None,
         )
 

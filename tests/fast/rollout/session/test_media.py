@@ -130,3 +130,45 @@ def test_unreadable_bytes_and_bad_base64_are_client_errors():
         store.register("data:image/png;base64," + base64.b64encode(b"not an image at all").decode())
     with pytest.raises(ValueError, match="not valid base64"):
         store.register("data:image/png;base64,@@@not-base64@@@")
+
+
+class FakeMuseProcessor:
+    """Counts like the Muse Spark train processor: a (grid_h, grid_w) patch
+    grid of 14 px patches merged 2x2 (a 56x56 image: grid 4x4, 4 tokens)."""
+
+    def image_patches(self, image):
+        grid = (image.height // 14, image.width // 14)
+        return None, grid, grid[0] * grid[1] // 4
+
+
+def test_muse_spark_train_inputs_ship_grids_and_the_patch_positions():
+    store = MediaStore(FakeMuseProcessor(), PAD, expanded_on_wire=True)
+    first, second = _png(width=56, height=56), _png(width=112, height=56, color=(7, 7, 7))
+    entries = [store.get(store.register(_data_url(first))), store.get(store.register(_data_url(second)))]
+    assert [e.num_tokens for e in entries] == [4, 8] and entries[0].grid_thw == (4, 4)
+    prompt = expand_image_placeholders([1, 9, PAD, 8, 2, 9, PAD, 8, 3], [4, 8], PAD)
+    packed = train_inputs(entries, prompt, PAD)
+    assert packed["mm_vision_grids"].tolist() == [[4, 4], [4, 8]]
+    assert packed["mm_vision_positions"].tolist() == [i for i, t in enumerate(prompt) if t == PAD]
+    assert "image_grid_thw" not in packed and packed["image_png"].tobytes() == first + second
+    with pytest.raises(ValueError, match="need"):
+        train_inputs(entries, [1, PAD, 2], PAD)
+
+
+def test_an_expanded_on_wire_store_sends_the_engine_the_expanded_ids():
+    import json
+
+    from miles.rollout.session.core import engine_request_body
+
+    url = _data_url(_png(width=56, height=56))
+    store = MediaStore(FakeMuseProcessor(), PAD, expanded_on_wire=True)
+    messages = normalize_messages([_image_message(url)], store)
+    body = json.loads(engine_request_body({"messages": messages, "input_ids": [1, 9, PAD, 8, 2]}, store))
+    assert body["input_ids"] == [1, 9, PAD, PAD, PAD, PAD, 8, 2]
+    assert body["messages"][0]["content"][1]["image_url"]["url"] == url
+    # a store whose engine expands keeps one placeholder on the wire
+    collapsed = MediaStore(FakeProcessor(), PAD)
+    messages = normalize_messages([_image_message(_data_url(_png()))], collapsed)
+    assert json.loads(engine_request_body({"messages": messages, "input_ids": [1, PAD, 2]}, collapsed))[
+        "input_ids"
+    ] == [1, PAD, 2]
