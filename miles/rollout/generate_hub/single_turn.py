@@ -42,6 +42,7 @@ async def generate(input: GenerateFnInput, url: str | None = None) -> GenerateFn
         multimodal_inputs=sample.multimodal_inputs,
         evaluation=input.evaluation,
         image_pad_id=image_pad_id_for(input.state),
+        kv_cache_namespace=sample.kv_cache_namespace,
     )
     if payload is None:
         sample.status = halt_status

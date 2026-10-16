@@ -109,6 +109,7 @@ def compute_request_payload(
     *,
     evaluation: bool = False,
     image_pad_id: int | None = None,
+    kv_cache_namespace: str | None = None,
 ) -> tuple[dict[str, Any] | None, Sample.Status | None]:
     """The ``/generate`` request for ``input_ids`` (the model's view: the
     image placeholders already expanded by the processor). With images the
@@ -147,6 +148,8 @@ def compute_request_payload(
                 "the engine would re-tokenize the prompt"
             )
         payload["input_ids"] = collapse_image_pads(input_ids, image_pad_id)
+    if kv_cache_namespace is not None:
+        payload["extra_key"] = kv_cache_namespace
 
     if not evaluation:
         configure_rollout_topk_logprobs_request(args, payload)
@@ -212,7 +215,8 @@ async def update_sample_from_response(
 
 
 def _decode_topk_buffer(info: str, num_tokens: int, num_layers: int, topk: int) -> np.ndarray:
-    x = np.frombuffer(pybase64.b64decode(info.encode("ascii")), dtype=np.int32)
+    # validate=True: SGLang sends plain base64; pybase64 skips its slow non-alphabet filtering pass.
+    x = np.frombuffer(pybase64.b64decode(info, validate=True), dtype=np.int32)
     if num_tokens <= 0:
         return np.empty((0, num_layers, max(0, topk)), dtype=np.int32)
     if topk == -1:  # indexer: topk dim recovered from buffer length

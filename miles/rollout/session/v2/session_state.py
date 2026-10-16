@@ -55,6 +55,7 @@ class SessionStateV2:
     sampling_support_replay: bool = False
     # The session's images (miles.rollout.session.media); None on a text-only server.
     media: MediaStore | None = field(default=None, repr=False, compare=False)
+    extra_key: str | None = None
 
     def latest(self) -> TrajectoryNode | None:
         """The most recently committed generation (always a leaf), or ``None``
@@ -227,6 +228,7 @@ class SessionRegistryV2(SessionRegistry):
         evaluation: bool = False,
         sampling_defaults: dict[str, Any] | None = None,
         sampling_support_replay: bool = False,
+        extra_key: str | None = None,
     ) -> str:
         session_id = uuid.uuid4().hex
         self.sessions[session_id] = SessionStateV2(
@@ -234,6 +236,7 @@ class SessionRegistryV2(SessionRegistry):
             sampling_defaults=dict(sampling_defaults or {}),
             sampling_support_replay=sampling_support_replay,
             media=self.new_media_store(),
+            extra_key=extra_key,
         )
         return session_id
 

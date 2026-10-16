@@ -11,7 +11,6 @@ from collections.abc import Sequence
 
 import torch
 import torch.distributed as dist
-from megatron.core.utils import unwrap_model
 
 from miles.backends.training_utils.parallel import get_parallel_state
 from miles.backends.training_utils.weight_update.hf_weight_iterator import HfWeightIteratorBase, WeightUpdatePlacement
@@ -35,9 +34,6 @@ class MegatronHfWeightIteratorBase(HfWeightIteratorBase):
             and self.quantization_config["quant_method"] == "compressed-tensors"
             else None
         )
-        trainer_has_mtp = bool(unwrap_model(self.model)[0].config.mtp_num_layers)
-        if self.args.sglang_speculative_algorithm and not trainer_has_mtp:
-            self.weight_update_selector = "target"
 
     def _hf_atomic_update_groups(self):
         return get_hf_atomic_update_groups(self.model_name, q_lora_rank=self.args.q_lora_rank)
@@ -139,6 +135,18 @@ def _gather_pp_full_adapter(
 
 
 def _iter_mm_tower_units(args, *, materialize):
-    if "inkling_mm_model_provider" not in (args.custom_model_provider_path or ""):
+    provider = args.custom_model_provider_path or ""
+    if "inkling_mm_model_provider" in provider:
+        prefixes = None
+    elif "muse_spark_1x_omni_model_provider" in provider:
+        # The trainer never owns the Muse Spark towers (the NaViT is frozen and unregistered), so every non-text
+        # tensor comes from the boot checkpoint, like any weight a colocated engine drops across offload.
+        from miles_plugins.models.muse_spark.weight_mapping import NON_TEXT_PREFIXES
+
+        prefixes = NON_TEXT_PREFIXES
+    else:
+        # TODO(guapisolo): decide whether to fix. The Muse Spark text provider lands here, so an engine serving the
+        # omni checkpoint keeps zeroed vision/audio towers after the colocated startup offload (no weights CPU
+        # backup); text rollouts are unaffected, image requests are not.
         return
-    yield from iter_checkpoint_tower_units(args.hf_checkpoint, materialize=materialize)
+    yield from iter_checkpoint_tower_units(args.hf_checkpoint, materialize=materialize, prefixes=prefixes)
