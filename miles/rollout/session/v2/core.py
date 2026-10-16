@@ -156,7 +156,8 @@ class SessionCoreV2(SessionCore):
     ) -> Response:
         """The samples build, pure CPU work on the session's tree and media;
         called in a thread with the session lock held."""
-        metadata = self._session_metadata(session_id, session, with_mismatch=self.mismatch_sampled(session_id))
+        sampled = self.mismatch_sampled(session_id)
+        metadata = self._session_metadata(session_id, session, with_mismatch=sampled)
         fields = COMPUTED_FIELDS_V2
         if session.sampling_support_replay:
             fields += ROLLOUT_SAMPLING_MASK_FIELDS
@@ -173,9 +174,12 @@ class SessionCoreV2(SessionCore):
                 session_id=session_id,
                 max_seq_len=max_seq_len,
                 use_addition_r3=self.use_addition_r3,
-                # The latest generation is always a leaf; its mismatch is already in the session metadata.
+                # The latest generation is always a leaf; its mismatch is already in the session metadata
+                # when this session was sampled for it (otherwise each leaf computes its own, as before).
                 # A copy: hooks may edit the session metadata, which must not reach that leaf's sample.
-                computed_mismatch={session.latest().seq: deepcopy(metadata.get("tito_session_mismatch"))},
+                computed_mismatch=(
+                    {session.latest().seq: deepcopy(metadata.get("tito_session_mismatch"))} if sampled else None
+                ),
             )
         except (AssertionError, ValueError) as exc:
             return Response(content=str(exc).encode(), status_code=422, media_type="text/plain")
