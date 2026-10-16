@@ -42,9 +42,8 @@ def test_production_family_construction(tokenizer):
     assert not tito.trailing_token_ids
     assert tito.chat_template_kwargs == {}
     assert resolve_reasoning_and_tool_call_parser("muse_spark") == ("muse", "muse")
-    assert tito.clone_with_chat_template_kwargs({"reasoning_effort": "high"}).chat_template_kwargs == {
-        "reasoning_effort": "high"
-    }
+    high = get_tito_tokenizer(tokenizer, "muse_spark", chat_template_kwargs={"reasoning_effort": "high"})
+    assert high.chat_template_kwargs == {"reasoning_effort": "high"}
 
 
 @pytest.mark.parametrize("effort", ["low", "medium", "high", "xhigh"])
@@ -57,10 +56,11 @@ def test_fixed_append_roles(tokenizer, effort, tool_prefix, role):
     if role == "tool":
         appendix.update(name="lookup", tool_call_id="call_1")
     new = old + [appendix]
-    prefix = tito.apply_chat_template(old, add_generation_prompt=False, tools=TOOLS)
-    expected = tito.apply_chat_template(new, add_generation_prompt=True, tools=TOOLS)
+    template_args = tito.default_template_args(tools=TOOLS)
+    prefix = tito.apply_chat_template(old, add_generation_prompt=False, template_args=template_args)
+    expected = tito.apply_chat_template(new, add_generation_prompt=True, template_args=template_args)
     prefix_ids = tokenizer.encode(prefix, add_special_tokens=False)
-    merged = tito.merge_tokens(old, new, prefix_ids, tools=TOOLS)
+    merged = tito.merge_tokens(old, new, prefix_ids, template_args=template_args)
     assert merged[: len(prefix_ids)] == prefix_ids
     assert tokenizer.decode(merged) == expected
 
