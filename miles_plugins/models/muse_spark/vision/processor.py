@@ -150,6 +150,16 @@ class MuseSparkTrainProcessor:
                     images.append(_load_pil_image(part.get("image", part.get("image_url"))))
         return {"images": images or None, "videos": None, "audios": None}
 
+    def image_patches(self, image: Any) -> tuple[torch.Tensor, tuple[int, int], int]:
+        """One image as the tower's bf16 patch rows, its ``(grid_h, grid_w)`` patch grid and
+        its LLM token count (``grid_h * grid_w / downsample**2``)."""
+        tensor, count = preprocess_image(image, self.vision_config)
+        patches, grid_h, grid_w = patchify_clip(
+            tensor.to(torch.bfloat16), self.vision_config.patch_size, self.vision_config.patch_temporal
+        )
+        assert count == grid_h * grid_w // self.vision_config.downsample_factor**2
+        return patches, (grid_h, grid_w), count
+
     def expand_text(self, text: str, token_counts: list[int]) -> str:
         """Replace each ``<image>`` (left to right) by the start/patch-run/end literal, like SGLang."""
         for count in token_counts:
@@ -172,14 +182,10 @@ class MuseSparkTrainProcessor:
         images = list(images or [])
         tensors, counts, grids = [], [], []
         for image in images:
-            tensor, count = preprocess_image(image, self.vision_config)
-            patches, grid_h, grid_w = patchify_clip(
-                tensor.to(torch.bfloat16), self.vision_config.patch_size, self.vision_config.patch_temporal
-            )
-            assert count == grid_h * grid_w // self.vision_config.downsample_factor**2
+            patches, grid, count = self.image_patches(image)
             tensors.append(patches)
             counts.append(count)
-            grids.append((grid_h, grid_w))
+            grids.append(grid)
         input_ids = self.tokenizer.encode(self.expand_text(text, counts), add_special_tokens=False)
         out: dict[str, Any] = {"input_ids": [input_ids]}
         if images:

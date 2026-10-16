@@ -61,6 +61,11 @@ def load_image_processor(hf_checkpoint: str) -> Any:
     from miles.utils.processing_utils import load_processor
 
     processor = load_processor(hf_checkpoint, trust_remote_code=True)
+    if hasattr(processor, "image_patches"):  # Muse Spark: the train processor patchifies itself
+        logger.info(
+            "png_images: rebuilding mm_vision_patches with %s from %s", type(processor).__name__, hf_checkpoint
+        )
+        return processor
     found = getattr(processor, "image_processor", None)
     if found is None:
         raise RuntimeError(f"{hf_checkpoint}: AutoProcessor has no image_processor to rebuild images with")
@@ -104,6 +109,30 @@ def pixel_values_from_pngs(processor: Any, image_png, image_png_lengths, image_g
     return torch.cat(chunks, dim=0)
 
 
+def vision_patches_from_pngs(processor: Any, image_png, image_png_lengths, mm_vision_grids) -> torch.Tensor:
+    """Muse Spark: decode each PNG, patchify it with the train processor
+    (``image_patches``), check its ``(grid_h, grid_w)`` against the shipped
+    one, and concatenate the patch rows in image order."""
+    from PIL import Image
+
+    pngs = split_pngs(image_png, image_png_lengths)
+    grids = mm_vision_grids.detach().to("cpu")
+    if grids.shape[0] != len(pngs):
+        raise ValueError(f"{len(pngs)} PNG(s) but {int(grids.shape[0])} image grid row(s)")
+    chunks = []
+    for index, png in enumerate(pngs):
+        with Image.open(io.BytesIO(png)) as decoded:
+            image = decoded.convert("RGB")
+        patches, grid, _ = processor.image_patches(image)
+        if list(grid) != grids[index].tolist():
+            raise ValueError(
+                f"image {index}: the rebuilt grid {list(grid)} differs from the shipped {grids[index].tolist()}; "
+                "the rollout side and the trainer run different image processors"
+            )
+        chunks.append(patches)
+    return torch.cat(chunks, dim=0)
+
+
 def rebuild_png_images(multimodal_train_inputs: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     """The micro-batch's multimodal dict with ``pixel_values`` rebuilt from
     its PNG keys (removed), on the device of ``image_grid_thw``; a dict
@@ -112,6 +141,19 @@ def rebuild_png_images(multimodal_train_inputs: dict[str, torch.Tensor]) -> dict
         return multimodal_train_inputs
     if "pixel_values" in multimodal_train_inputs:
         raise ValueError("a batch carries both pixel_values and image_png")
+    if "mm_vision_grids" in multimodal_train_inputs:
+        if "mm_vision_patches" in multimodal_train_inputs:
+            raise ValueError("a batch carries both mm_vision_patches and image_png")
+        grids = multimodal_train_inputs["mm_vision_grids"]
+        patches = vision_patches_from_pngs(
+            image_processor(),
+            multimodal_train_inputs["image_png"],
+            multimodal_train_inputs["image_png_lengths"],
+            grids,
+        )
+        out = {k: v for k, v in multimodal_train_inputs.items() if k not in PNG_KEYS}
+        out["mm_vision_patches"] = patches.to(device=grids.device)
+        return out
     if "image_png_lengths" not in multimodal_train_inputs or "image_grid_thw" not in multimodal_train_inputs:
         raise ValueError("image_png needs image_png_lengths and image_grid_thw")
     grid = multimodal_train_inputs["image_grid_thw"]
