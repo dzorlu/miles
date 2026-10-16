@@ -421,6 +421,8 @@ def _build_server_config(
         rollout_top_logprobs_num=0,
         rollout_sampling_logprobs_mode="selected",
         rollout_temperature=1.0,
+        tito_session_mismatch_rate=0.0,
+        session_chat_timing_log=False,
     )
 
 
