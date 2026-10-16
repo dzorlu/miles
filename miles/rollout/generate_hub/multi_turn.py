@@ -10,8 +10,9 @@ from miles.rollout.base_types import GenerateFnInput, GenerateFnOutput
 from miles.rollout.generate_utils.generate_endpoint_utils import (
     compute_prompt_ids_from_sample,
     compute_request_payload,
-    image_pad_id_for,
     compute_routing_headers,
+    image_pad_id_for,
+    images_expanded_on_wire,
     update_sample_from_response,
 )
 from miles.rollout.generate_utils.tool_call_utils import (
@@ -60,6 +61,7 @@ async def generate(input: GenerateFnInput) -> GenerateFnOutput:
             evaluation=input.evaluation,
             kv_cache_namespace=sample.kv_cache_namespace,
             image_pad_id=image_pad_id_for(input.state),
+            collapse_images=not images_expanded_on_wire(input.state),
         )
         if payload is None:
             sample.status = halt_status
