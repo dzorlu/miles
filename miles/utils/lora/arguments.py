@@ -15,6 +15,7 @@ from miles.utils.lora.hf_lora_targets import (
 from miles.utils.lora.utils import is_lora_enabled, matches_lora_target, targets_expert_leaves
 from miles_plugins.models.inkling.lora import resolve_inkling_adapter_targets
 from miles_plugins.models.kimi_k3.lora import resolve_kimi_k3_adapter_targets
+from miles_plugins.models.muse_spark.lora_targets import ADAPTER_TARGETS as MUSE_SPARK_ADAPTER_TARGETS
 
 logger = logging.getLogger(__name__)
 
@@ -94,6 +95,16 @@ def add_lora_arguments(parser):
         ),
     )
     parser.add_argument(
+        "--lora-sync-merged",
+        action="store_true",
+        default=False,
+        help=(
+            "Train LoRA adapters in Megatron and sync the base weights with the adapters merged in "
+            "(W + alpha/rank * B @ A) on every weight update; the engines serve no LoRA. For models whose "
+            "SGLang implementation has no LoRA support (Muse Spark native LoRA)."
+        ),
+    )
+    parser.add_argument(
         "--experts-shared-outer-loras",
         action="store_true",
         default=False,
@@ -140,6 +151,9 @@ def validate_lora_args(args):
     assert args.train_backend == "megatron", "LoRA injection is not implemented for FSDP; use --train-backend megatron"
     assert args.lora_rank > 0, "LoRA requires a positive --lora-rank, including when loading an adapter"
     hf_config = load_hf_config(args.hf_checkpoint)
+    if args.lora_sync_merged:
+        _validate_merged_lora_args(args, hf_config)
+        return
     args.hf_lora_targets, args.lora_adapter_targets = _resolve_lora_targets(args, hf_config)
 
     # Training and serving must agree on shared-outer grouped-expert LoRA (expert_dim=1).
@@ -153,6 +167,22 @@ def validate_lora_args(args):
             "MoE-expert LoRA layout: %s (--experts-shared-outer-loras).",
             "shared-outer" if args.experts_shared_outer_loras else "per-expert",
         )
+
+
+def _validate_merged_lora_args(args, hf_config) -> None:
+    """``--lora-sync-merged`` trains Muse Spark's fixed native adapter set; the engines see merged base weights."""
+    assert (
+        hf_config.model_type == "muse_spark"
+    ), f"--lora-sync-merged is implemented for Muse Spark native LoRA only (model_type {hf_config.model_type!r})"
+    assert args.megatron_to_hf_mode == "raw", "--lora-sync-merged merges into the raw Megatron weights"
+    assert not args.lora_train_only, "--lora-sync-merged updates the engines; --lora-train-only keeps them frozen"
+    assert args.target_modules is None and not args.exclude_modules, (
+        "Muse Spark native LoRA adapts a fixed set (miles_plugins/models/muse_spark/lora_targets.py); "
+        "omit --target-modules and --exclude-modules"
+    )
+    assert args.lora_type == "lora", "Muse Spark native LoRA does not implement --lora-type canonical_lora"
+    assert not args.experts_shared_outer_loras, "Muse Spark native LoRA keeps per-expert A and B"
+    args.hf_lora_targets = args.lora_adapter_targets = list(MUSE_SPARK_ADAPTER_TARGETS)
 
 
 def _resolve_lora_targets(args, hf_config):
