@@ -172,3 +172,47 @@ def test_an_expanded_on_wire_store_sends_the_engine_the_expanded_ids():
     assert json.loads(engine_request_body({"messages": messages, "input_ids": [1, PAD, 2]}, collapsed))[
         "input_ids"
     ] == [1, PAD, 2]
+
+
+class TestExpandedLength:
+    """``expanded_length`` counts a token list the way the engine does: each
+    image placeholder at the image's token count, images taken in message
+    order; it is what the addition-R3 row offsets are computed in."""
+
+    PAD = 151655
+
+    def _store_with(self, *pngs):
+        from miles.rollout.session.media import MediaStore, normalize_messages
+
+        store = MediaStore(FakeProcessor(), self.PAD)
+        messages = normalize_messages([_image_message(_data_url(png)) for png in pngs], store)
+        return store, messages
+
+    def test_placeholders_count_at_the_images_token_counts_in_message_order(self):
+        from miles.rollout.session.media import expanded_length
+
+        store, messages = self._store_with(_png(), _png(width=128))  # 4 and 8 tokens
+        assert expanded_length([1, self.PAD, 2, self.PAD, 3], messages, store) == 5 - 2 + 4 + 8
+
+    def test_a_prefix_with_fewer_placeholders_uses_the_first_images(self):
+        from miles.rollout.session.media import expanded_length
+
+        store, messages = self._store_with(_png(), _png(width=128))
+        # A checkpoint that predates the second image: one placeholder, the first image's count.
+        assert expanded_length([1, self.PAD, 2], messages, store) == 3 - 1 + 4
+
+    def test_text_only_servers_and_ids_without_placeholders_count_as_they_are(self):
+        from miles.rollout.session.media import MediaStore, expanded_length
+
+        store, messages = self._store_with(_png())
+        assert expanded_length([1, 2, 3], messages, store) == 3
+        assert expanded_length([1, self.PAD, 3], messages, None) == 3
+        flat = MediaStore(FakeProcessor(), self.PAD, expands=False)
+        assert expanded_length([1, self.PAD, 3], messages, flat) == 3
+
+    def test_more_placeholders_than_images_is_refused(self):
+        from miles.rollout.session.media import expanded_length
+
+        store, messages = self._store_with(_png())
+        with pytest.raises(ValueError, match="2 image placeholder"):
+            expanded_length([1, self.PAD, self.PAD], messages, store)
