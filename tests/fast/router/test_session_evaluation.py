@@ -309,3 +309,23 @@ def test_addition_r3_offsets_count_the_checkpoints_images_at_their_expanded_size
     text = {"return_routed_experts": True}
     core._maybe_request_addition_r3(text, [1, 2, 3, 4], [1, 2, 3, 4, 5])
     assert text["routed_experts_start_len"] == 3
+
+
+def test_with_replay_off_the_request_is_untouched_even_with_images():
+    """Without --use-rollout-routing-replay the request carries
+    return_routed_experts=False (request_args), so no offset is computed or
+    sent, images or not: the wire request is the one sent today."""
+    from tests.fast.rollout.session.test_media import FakeProcessor, _data_url, _image_message, _png
+
+    from miles.rollout.session.media import MediaStore, normalize_messages
+
+    pad = 151655
+    store = MediaStore(FakeProcessor(), pad)
+    messages = normalize_messages([_image_message(_data_url(_png()))], store)
+    core = SessionCore(None, None, make_session_server_config(), use_addition_r3=True)
+    for body in ({"return_routed_experts": False}, {}):
+        before = dict(body)
+        core._maybe_request_addition_r3(
+            body, [1, pad, 2, 7], [1, pad, 2, 7, 3], checkpoint_messages=messages, media=store
+        )
+        assert body == before
