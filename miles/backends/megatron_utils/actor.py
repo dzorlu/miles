@@ -2,6 +2,7 @@ import atexit
 import logging
 import os
 import shutil
+from collections.abc import Mapping
 from contextlib import ExitStack, nullcontext
 from functools import partial
 
@@ -11,7 +12,9 @@ from megatron.training.async_utils import maybe_finalize_async_save
 from torch_memory_saver import torch_memory_saver
 
 from miles.backends.megatron_utils.hf_export import save_hf_model
+from miles.backends.megatron_utils.lora.merge import merged_lora_weights
 from miles.backends.megatron_utils.lora.utils import is_lora_enabled, lora_rollout_enabled
+from miles.utils.lora.utils import lora_adapter_memory_layout
 from miles.backends.megatron_utils.rematerialize_utils import build_main_cast_context
 from miles.backends.megatron_utils.update_weight.hf_weight_iterator import get_hf_weight_iterator
 from miles.backends.training_utils.checkpoint.tracker import read_checkpoint_tracker_iteration
@@ -294,7 +297,7 @@ class MegatronTrainRayActor(TrainRayActor):
             self.weight_updater = WeightUpdater(
                 args,
                 self.model,
-                weights_getter=self._get_actor_weights,
+                weights_getter=self._get_sync_weights,
                 model_name=model_name,
                 quantization_config=quantization_config,
                 iterator_factory=get_hf_weight_iterator,
@@ -465,7 +468,7 @@ class MegatronTrainRayActor(TrainRayActor):
             # Params stay resident for update_weights, which pauses them afterwards.
             torch_memory_saver.pause(tag="grad_buffer")
             torch_memory_saver.pause(tag="default")
-        elif lora_rollout_enabled(self.args):
+        elif lora_adapter_memory_layout(self.args):
             # adapter params keep their host backup in "default"; the grad buffers have none
             if not self._grad_buffer_paused:
                 torch_memory_saver.pause(tag="grad_buffer")
@@ -485,7 +488,7 @@ class MegatronTrainRayActor(TrainRayActor):
     def offload_grad_buffer(self) -> None:
         """Free the LoRA grad buffers ahead of sleep(), so the engine can resume its weights first."""
         assert self.args.offload_train
-        assert lora_rollout_enabled(self.args), "only LoRA keeps its grad buffers in a no-backup region"
+        assert lora_adapter_memory_layout(self.args), "only LoRA keeps its grad buffers in a no-backup region"
         if self._asleep or self._grad_buffer_paused:
             return
         print_memory("before offload grad buffer")
@@ -503,7 +506,7 @@ class MegatronTrainRayActor(TrainRayActor):
             return
         print_memory("before wake_up model")
 
-        if lora_rollout_enabled(self.args):
+        if lora_adapter_memory_layout(self.args):
             torch_memory_saver.resume(tag="default")
             torch_memory_saver.resume(tag="grad_buffer")
             self._grad_buffer_paused = False
@@ -912,6 +915,11 @@ class MegatronTrainRayActor(TrainRayActor):
                 if include_model_companion or not ModelCompanionInstallationUtils.is_companion_parameter(name)
             }
         return dict(self._named_actor_weights(include_model_companion=include_model_companion))
+
+    def _get_sync_weights(self) -> Mapping[str, torch.Tensor]:
+        """What the engines receive: the actor weights, with native LoRA merged in under --lora-sync-merged."""
+        weights = self._get_actor_weights()
+        return merged_lora_weights(self.args, weights) if self.args.lora_sync_merged else weights
 
     def _get_actor_weight_version(self) -> int:
         return ModelCompanionWeightVersionUtils.from_params(

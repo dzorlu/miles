@@ -172,6 +172,10 @@ def setup_model_and_optimizer(
                 from miles_plugins.models.inkling.lora import wrap_model_provider_with_inkling_lora
 
                 provider_func = wrap_model_provider_with_inkling_lora(provider_func, args)
+            elif "muse_spark" in (args.custom_model_provider_path or ""):
+                from miles_plugins.models.muse_spark.lora import wrap_model_provider_with_muse_spark_lora
+
+                provider_func = wrap_model_provider_with_muse_spark_lora(provider_func, args)
             # TODO: will rewrite in native lora refactor
             elif "kimi_k3" in (args.model_name or "").lower():
                 from miles_plugins.models.kimi_k3.lora import wrap_model_provider_with_kimi_k3_lora
@@ -183,7 +187,7 @@ def setup_model_and_optimizer(
                     patch_param_grad_buffer_for_colocate_mode_lora()
             else:
                 raise AssertionError(
-                    "Native LoRA injection is only implemented for Inkling and Kimi K3; "
+                    "Native LoRA injection is only implemented for Inkling, Muse Spark and Kimi K3; "
                     "use --megatron-to-hf-mode bridge"
                 )
         model = get_model(provider_func, ModelType.encoder_or_decoder)
