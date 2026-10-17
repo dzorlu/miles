@@ -1,5 +1,7 @@
 """Muse Spark native LoRA with merged weight sync (--lora-sync-merged).
 
+The merged view computes on the current CUDA device when there is one; results come back with .cpu().
+
 The adapted forward of every linear equals the frozen linear run with the merged weight that the
 engines receive (``MergedLoRAWeights``), so rollouts sample from the trained policy; the merge is local
 per shard and maps global expert indices to local ones."""
@@ -79,7 +81,7 @@ def test_the_adapted_forward_equals_the_merged_weight(muse_lora, kind):
 
     adapted, _ = linear(x)
     merged = MergedLoRAWeights(_weights("m.self_attention.linear_qkv", linear), scale=SCALE, expert_offset=0)
-    expected = x @ merged["m.self_attention.linear_qkv.weight"].T
+    expected = x @ merged["m.self_attention.linear_qkv.weight"].cpu().T
 
     torch.testing.assert_close(adapted, expected, rtol=1e-5, atol=1e-5)
 
@@ -102,7 +104,7 @@ def test_grouped_experts_merge_per_expert_with_the_global_offset(muse_lora):
     }
     merged = MergedLoRAWeights(weights, scale=SCALE, expert_offset=6)
     pieces = torch.split(x, tokens)
-    expected = torch.cat([p @ merged[f"{module}.weight{6 + e}"].T for e, p in enumerate(pieces)])
+    expected = torch.cat([p @ merged[f"{module}.weight{6 + e}"].cpu().T for e, p in enumerate(pieces)])
 
     torch.testing.assert_close(adapted, expected, rtol=1e-5, atol=1e-5)
 
@@ -113,7 +115,7 @@ def test_zero_initialized_b_merges_to_the_base_and_unadapted_weights_pass_throug
     weights = {**_weights("a.linear_qkv", linear), "a.norm.weight": torch.ones(3)}
     merged = MergedLoRAWeights(weights, scale=SCALE, expert_offset=0)
 
-    assert torch.equal(merged["a.linear_qkv.weight"], linear.weight.detach())
+    assert torch.equal(merged["a.linear_qkv.weight"].cpu(), linear.weight.detach())
     assert merged["a.norm.weight"] is weights["a.norm.weight"]
     assert set(merged) == set(weights)
 
@@ -126,7 +128,7 @@ def test_the_merge_keeps_the_base_dtype_and_never_modifies_the_base():
         "x.lora_adapter.lora_B": torch.randn(4, RANK).to(torch.bfloat16),
     }
     before = base.clone()
-    merged = MergedLoRAWeights(weights, scale=SCALE, expert_offset=0)["x.weight"]
+    merged = MergedLoRAWeights(weights, scale=SCALE, expert_offset=0)["x.weight"].cpu()
 
     assert merged.dtype == torch.bfloat16 and torch.equal(base, before)
     expected = (
