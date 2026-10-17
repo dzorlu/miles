@@ -819,6 +819,45 @@ class TestAdditionR3Assembly:
     one (len(tokens) - 1, num_layers, topk) tensor after the ordinary merge.
     """
 
+    def test_image_records_offsets_are_in_the_engines_expanded_token_space(self):
+        """A record whose prompt holds an image placeholder: the engine ran the
+        placeholder expanded to the image's 4 tokens, so its rows end at the
+        expanded length plus the outputs, minus one, and the next record's
+        offset (computed the same way by the session) continues from there."""
+        from tests.fast.rollout.session.test_media import FakeProcessor, _data_url, _image_message, _png
+
+        from miles.rollout.session.media import MediaStore, normalize_messages
+
+        pad = 151655
+        store = MediaStore(FakeProcessor(), pad)
+        messages = normalize_messages([_image_message(_data_url(_png()))], store)
+        # Turn 1: 3 ids sent, 6 run (one 4-token image), 2 outputs: rows [0, 7).
+        # Turn 2: checkpoint [1, pad, 2, 7, 8] = 8 expanded tokens -> start 7;
+        # 6 ids sent, 9 run, 1 output: rows [7, 9).
+        full = _r3_rows(9, seed=0)
+        first = _make_record(
+            [1, pad, 2], [7, 8], prompt_tokens=6, routed_experts=_r3_patch(full[:7]), routed_experts_start_len=0
+        )
+        first.request["messages"] = messages
+        second = _make_record(
+            [1, pad, 2, 7, 8, 3], [9], prompt_tokens=9, routed_experts=_r3_patch(full[7:]), routed_experts_start_len=7
+        )
+        second.request["messages"] = messages
+        tok = _mock_tokenizer()
+        turns = compute_samples_from_openai_records(
+            _ARGS_R3,
+            [first, second],
+            tok,
+            accumulated_token_ids=[1, pad, 2, 7, 8, 3, 9],
+            use_addition_r3=True,
+            media=store,
+        )
+        merged = merge_samples_with_addition_r3(_ARGS_R3, turns, [first, second], tok, media=store)
+        assert merged.tokens == [1, pad, pad, pad, pad, 2, 7, 8, 3, 9]
+        np.testing.assert_array_equal(merged.rollout_routed_experts, full)
+        merged.validate()
+
+
     def test_two_patches_reconstruct_full_reference(self):
         """Patches must rebuild byte-for-byte the tensor full-R3 responses give
         for the same tokens under the same in-place lifecycle."""

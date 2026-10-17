@@ -85,7 +85,7 @@ def build_leaf_material(
         if not turns:
             continue
         if use_addition_r3:
-            sample = merge_samples_with_addition_r3(args, turns, records, registry.tokenizer)
+            sample = merge_samples_with_addition_r3(args, turns, records, registry.tokenizer, media=state.media)
         else:
             sample = merge_samples(turns, registry.tokenizer)
         flat: dict[str, Any] = {

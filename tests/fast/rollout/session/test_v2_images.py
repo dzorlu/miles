@@ -7,11 +7,13 @@ carry the expanded prompt plus the images in the trainer's PNG format."""
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import os
 import threading
 import uuid
 
+import numpy as np
 import pytest
 import torch
 from tests.fast.fixtures.session_fixtures import make_session_server_config
@@ -268,6 +270,99 @@ async def test_the_samples_worker_builds_from_the_images_of_its_snapshot(tokeniz
     assert response.body == expected.body
     (sample,) = decode_samples_and_merge_input_sample(response.body, Sample(), fields=COMPUTED_FIELDS_V2).samples
     assert sample.multimodal_train_inputs["image_grid_thw"].tolist() == [[1, 4, 4]]
+
+
+class RoutedExpertsEngine(ExactTokenEngine):
+    """The exact-token engine with routed-experts capture: a request with
+    ``return_routed_experts`` gets rows [routed_experts_start_len, seqlen - 1)
+    in its meta_info, counted on the expanded ids it ran, each row holding its
+    absolute position so a sample's rows can be checked against its tokens."""
+
+    LAYERS, TOPK = 2, 2
+
+    async def do_proxy(self, request, path, *, body, headers):
+        result = await super().do_proxy(request, path, body=body, headers=headers)
+        payload = self.bodies[-1]
+        if not payload.get("return_routed_experts"):
+            return result
+        response = json.loads(result["response_body"])
+        meta = response["choices"][0]["meta_info"]
+        seqlen = meta["prompt_tokens"] + meta["completion_tokens"]
+        start = payload.get("routed_experts_start_len", 0)
+        rows = np.arange(start, seqlen - 1, dtype=np.int32)
+        payload_rows = np.repeat(rows[:, None, None], self.LAYERS * self.TOPK, axis=1).reshape(
+            -1, self.LAYERS, self.TOPK
+        )
+        meta["routed_experts"] = base64.b64encode(np.ascontiguousarray(payload_rows).tobytes()).decode("ascii")
+        result["response_body"] = json.dumps(response)
+        return result
+
+
+def test_addition_r3_rows_follow_the_expanded_image_tokens_across_turns_and_branches(tokenizer):
+    """Through the v2 server with a non-retract pause mode: every turn asks the
+    engine for the rows after the checkpoint's expanded length (one placeholder
+    per image on the wire, 4 or 8 tokens where the engine runs it), a branch
+    off an earlier node starts at that node's expanded length, and each leaf's
+    sample reassembles exactly len(tokens) - 1 rows whose positions match."""
+    tito = get_tito_tokenizer(tokenizer, tokenizer_type="qwen38small")
+    pad_id = tito.image_pad_id()
+    first_url, second_url, third_url = (
+        _data_url(_png()),
+        _data_url(_png(width=128, color=(5, 5, 5))),
+        _data_url(_png(width=128, color=(9, 9, 9))),
+    )
+    engine = RoutedExpertsEngine(tokenizer, pad_id, {first_url: 4, second_url: 8, third_url: 8}, reply="ok")
+    config = make_session_server_config(
+        use_session_server="v2",
+        hf_checkpoint=MODEL,
+        tito_model="qwen38small",
+        instance_id=uuid.uuid4().hex,
+        use_rollout_routing_replay=True,
+        pause_generation_mode="in_place",
+        num_layers=RoutedExpertsEngine.LAYERS,
+        moe_router_topk=RoutedExpertsEngine.TOPK,
+        # The fold picker: a sibling with a different prompt is a branch and
+        # both leaves stay (drop_rolled_back_leaves would trim the pre-fold leaf).
+        session_sample_picker_path="miles.rollout.session.v2.picker_hub.drop_same_prompt_retries",
+        session_sample_postprocessor_path="miles.rollout.session.v2.postprocessor_hub.default_postprocess",
+    )
+    registry = SessionRegistryV2(tokenizer, tito_tokenizer=tito, processor=FakeProcessor())
+    core = SessionCoreV2(engine, registry, config, config.instance_id, use_addition_r3=True)
+    session_id = registry.create_session()
+
+    def user(text, url):
+        return {
+            "role": "user",
+            "content": [{"type": "text", "text": text}, {"type": "image_url", "image_url": {"url": url}}],
+        }
+
+    turn1 = [user("look", first_url)]
+    response = _chat(core, session_id, turn1)
+    assert response.status_code == 200, response.body
+    assistant = json.loads(response.body)["choices"][0]["message"]
+    assert engine.bodies[0]["return_routed_experts"] is True and engine.bodies[0]["routed_experts_start_len"] == 0
+    node1 = registry.get_session(session_id).latest()
+    checkpoint1_expanded = len(node1.token_ids) - 1 + 4
+
+    assert _chat(core, session_id, turn1 + [assistant, user("next", second_url)]).status_code == 200
+    assert engine.bodies[1]["routed_experts_start_len"] == checkpoint1_expanded - 1
+    # A branch off the turn-1 node (a fold rewrites the second user turn: a
+    # different note and screenshot, so a different prompt, not a retry): the
+    # offset returns to that node's expanded length.
+    assert _chat(core, session_id, turn1 + [assistant, user("after the fold", third_url)]).status_code == 200
+    assert engine.bodies[2]["routed_experts_start_len"] == checkpoint1_expanded - 1
+
+    reply = asyncio.run(core.collect_samples(session_id, max_seq_len=None))
+    assert reply.status_code == 200, reply.body
+    decoded = decode_samples_and_merge_input_sample(reply.body, Sample(), fields=COMPUTED_FIELDS_V2)
+    assert len(decoded.samples) == 2, "one sample per leaf"
+    for sample in decoded.samples:
+        rows = sample.rollout_routed_experts
+        assert rows.shape == (len(sample.tokens) - 1, RoutedExpertsEngine.LAYERS, RoutedExpertsEngine.TOPK)
+        # Rows carry their absolute position: a correct assembly is 0, 1, 2, ...
+        assert rows[:, 0, 0].tolist() == list(range(len(sample.tokens) - 1))
+        assert sample.tokens.count(pad_id) == 12
+        sample.validate()
 
 
 def test_an_engine_that_retokenizes_is_refused_at_sample_time(tokenizer):
