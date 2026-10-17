@@ -30,7 +30,13 @@ from miles.rollout.session.errors import (
     UpstreamResponseError,
 )
 from miles.rollout.session.linear_trajectory import LinearTrajectory, SessionRegistry
-from miles.rollout.session.media import MediaStore, media_references, normalize_messages, restore_messages
+from miles.rollout.session.media import (
+    MediaStore,
+    expanded_length,
+    media_references,
+    normalize_messages,
+    restore_messages,
+)
 from miles.rollout.session.request_args import ClientResponseIntent, filter_turn_args, parse_chat_request
 from miles.rollout.session.samples.codec import COMPUTED_FIELDS, ROLLOUT_SAMPLING_MASK_FIELDS, encode_samples
 from miles.rollout.session.samples.merge import (
@@ -294,7 +300,13 @@ class SessionCore:
         await asyncio.to_thread(self._sample_executor.shutdown, wait=True, cancel_futures=True)
 
     def _maybe_request_addition_r3(
-        self, request_body: dict, checkpoint_token_ids: list[int], prompt_token_ids: list[int]
+        self,
+        request_body: dict,
+        checkpoint_token_ids: list[int],
+        prompt_token_ids: list[int],
+        *,
+        checkpoint_messages: list[dict] | None = None,
+        media: MediaStore | None = None,
     ) -> None:
         """Ask SGLang to return only the R3 rows the session has not retained.
 
@@ -302,15 +314,22 @@ class SessionCore:
         (v1: the post-rollback checkpoint; v2: the positioned attach node). The
         checkpoint's N - 1 rows must remain a causal prefix of the new prompt,
         so every persisted patch starts exactly where the previous one ended.
+
+        The engine counts rows on the ids it ran, with every image placeholder
+        expanded to the image's token count, so the offset it is sent is the
+        checkpoint's expanded length (``checkpoint_messages`` name the
+        checkpoint's images, in order, through ``media``); the prefix check
+        stays on the stored ids, which is what both sides were rendered from.
         """
         if not (self.use_addition_r3 and request_body.get("return_routed_experts")):
             return
         previous_rows = max(0, len(checkpoint_token_ids) - 1)
-        assert prompt_token_ids[:previous_rows] == checkpoint_token_ids[:previous_rows], (
-            f"additional R3 requires {previous_rows} stable prefix tokens, "
-            f"got {_lcp_len(checkpoint_token_ids, prompt_token_ids)}"
-        )
-        request_body["routed_experts_start_len"] = previous_rows
+        stable_prefix_tokens = _lcp_len(checkpoint_token_ids, prompt_token_ids)
+        assert (
+            stable_prefix_tokens >= previous_rows
+        ), f"additional R3 requires {previous_rows} stable prefix tokens, got {stable_prefix_tokens}"
+        expanded = expanded_length(checkpoint_token_ids, checkpoint_messages or [], media)
+        request_body["routed_experts_start_len"] = max(0, expanded - 1)
 
     async def health(self) -> Response:
         body = {"status": "ok"}
@@ -395,7 +414,11 @@ class SessionCore:
             if not samples:
                 return _samples_response(encode_samples([], metadata, empty_reason="all_truncated", fields=fields))
             if self.use_addition_r3:
-                samples = [merge_samples_with_addition_r3(self.config, samples, session.records, tokenizer)]
+                samples = [
+                    merge_samples_with_addition_r3(
+                        self.config, samples, session.records, tokenizer, media=session.media
+                    )
+                ]
             else:
                 samples = [merge_samples(samples, tokenizer)]
             adopt_session_records(samples[0], session.records)
@@ -462,7 +485,13 @@ class SessionCore:
 
             # prepare_token_ids_and_request_args applied any retry rollback, so token_ids is
             # the checkpoint this request builds on.
-            self._maybe_request_addition_r3(request_body, session.token_ids, prompt_token_ids)
+            self._maybe_request_addition_r3(
+                request_body,
+                session.token_ids,
+                prompt_token_ids,
+                checkpoint_messages=session.messages,
+                media=session.media,
+            )
 
             # orjson: the body carries the whole prompt's input_ids on every turn.
             proxy_body = engine_request_body(request_body, session.media)
