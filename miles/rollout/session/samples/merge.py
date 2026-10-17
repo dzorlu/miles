@@ -19,7 +19,13 @@ from miles.rollout.generate_utils.generate_endpoint_utils import (
 from miles.rollout.generate_utils.rollout_topk_logprobs import append_rollout_topk_logprobs
 from miles.rollout.generate_utils.sample_utils import merge_samples
 from miles.rollout.generate_utils.sampling_mask import append_sampling_metadata
-from miles.rollout.session.media import MediaStore, expand_image_placeholders, media_references, train_inputs
+from miles.rollout.session.media import (
+    MediaStore,
+    expand_image_placeholders,
+    expanded_length,
+    media_references,
+    train_inputs,
+)
 from miles.rollout.session.types import SessionRecord
 from miles.utils.lifecycle import attach_lifecycle_metadata
 from miles.utils.types import Sample, WeightVersionsPerCall
@@ -225,8 +231,15 @@ def merge_samples_with_addition_r3(
     samples: list[Sample],
     records: list[SessionRecord],
     tokenizer,
+    *,
+    media: MediaStore | None = None,
 ) -> Sample:
-    """Merge ordinary fields, then materialize the required append-only R3 prefix."""
+    """Merge ordinary fields, then materialize the required append-only R3 prefix.
+
+    Row offsets are in the engine's token space: a record's rows end at its
+    expanded prompt length plus its outputs, minus one (``media`` expands the
+    image placeholders the way the engine did), which is where the next
+    record's ``routed_experts_start_len`` was computed."""
     merged = merge_samples(samples, tokenizer)
     if all(record.response["choices"][0]["meta_info"].get("routed_experts") is None for record in records):
         return merged
@@ -249,7 +262,8 @@ def merge_samples_with_addition_r3(
         if start != covered_rows:
             raise ValueError(f"additional R3: record {i} starts at row {start}; expected {covered_rows}")
 
-        end = len(record.request["input_ids"]) + len(choice["meta_info"]["output_token_logprobs"]) - 1
+        prompt_len = expanded_length(record.request["input_ids"], record.request.get("messages") or [], media)
+        end = prompt_len + len(choice["meta_info"]["output_token_logprobs"]) - 1
         if end < start:
             raise ValueError(f"additional R3: record {i} has invalid offsets (start={start}, end={end})")
         delta_rows = end - start

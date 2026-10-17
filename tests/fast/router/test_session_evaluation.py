@@ -287,3 +287,25 @@ async def test_eval_does_not_run_additional_r3_prefix_assertion():
     assert "routed_experts_start_len" not in body
     with pytest.raises(AssertionError, match="additional R3 requires"):
         core._maybe_request_addition_r3({"return_routed_experts": True}, [1, 2, 3, 4], [99])
+
+
+def test_addition_r3_offsets_count_the_checkpoints_images_at_their_expanded_size():
+    """The engine counts rows on the ids it ran, with every image placeholder
+    expanded to the image's token count: a checkpoint of 5 ids holding one
+    4-token image is 8 tokens there, so its rows end at 7, not 4."""
+    from tests.fast.rollout.session.test_media import FakeProcessor, _data_url, _image_message, _png
+
+    from miles.rollout.session.media import MediaStore, normalize_messages
+
+    pad = 151655
+    store = MediaStore(FakeProcessor(), pad)
+    messages = normalize_messages([_image_message(_data_url(_png()))], store)  # 64x64: 4 tokens
+    core = SessionCore(None, None, make_session_server_config(), use_addition_r3=True)
+    checkpoint = [1, pad, 2, 7, 8]
+    body = {"return_routed_experts": True}
+    core._maybe_request_addition_r3(body, checkpoint, checkpoint + [3], checkpoint_messages=messages, media=store)
+    assert body["routed_experts_start_len"] == (5 - 1 + 4) - 1
+
+    text = {"return_routed_experts": True}
+    core._maybe_request_addition_r3(text, [1, 2, 3, 4], [1, 2, 3, 4, 5])
+    assert text["routed_experts_start_len"] == 3
