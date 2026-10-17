@@ -243,7 +243,13 @@ class SessionCoreV2(SessionCore):
             logger.debug("Using TITO input_ids: %d tokens", len(prompt_token_ids))
 
             checkpoint_token_ids = attach_parent.token_ids if attach_parent is not None else []
-            self._maybe_request_addition_r3(request_body, checkpoint_token_ids, prompt_token_ids)
+            self._maybe_request_addition_r3(
+                request_body,
+                checkpoint_token_ids,
+                prompt_token_ids,
+                checkpoint_messages=attach_parent.path_messages() if attach_parent is not None else [],
+                media=session.media,
+            )
             _add_session_extra_key(request_body, session)
 
             # orjson: the body carries the whole prompt's input_ids on every turn.
