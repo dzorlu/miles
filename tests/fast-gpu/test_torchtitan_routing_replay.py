@@ -161,6 +161,50 @@ def test_a_stray_forward_is_reported(part):
                 part(scores)
 
 
+def test_a_record_pass_queues_one_entry_per_microbatch(part):
+    """Plain --use-routing-replay runs the log-prob pass in the record stage:
+    nothing is popped, one entry lands per microbatch, and the train pass
+    replays them. The guard held every pass to a pop per microbatch, so that
+    first pass raised before any entry existed."""
+    scores = torch.rand(1, 4, 8, device="cuda")
+    replay = routing_replay_manager.replays[0]
+
+    with shared_replay.stage(shared_replay.RECORD), routing_replay.consumption_guard([part], 2):
+        for _ in range(2):
+            part(scores)
+
+    assert len(replay.top_indices_list) == 2
+    assert replay.forward_index == 0
+    with routing_replay.consumption_guard([part], 2):
+        for _ in range(2):
+            part(scores)
+
+
+def test_a_record_pass_short_of_an_entry_is_reported(part):
+    scores = torch.rand(1, 4, 8, device="cuda")
+
+    with pytest.raises(RuntimeError, match="recorded 1 entries and popped 0 over a record pass of 2"):
+        with shared_replay.stage(shared_replay.RECORD), routing_replay.consumption_guard([part], 2):
+            part(scores)
+
+
+def test_a_fallthrough_pass_leaves_the_queues_alone(part):
+    """The reference model's pass and a probe forward fall through: the router
+    chooses for itself and the queues stay as they were."""
+    _queue_microbatches(2)
+    scores = torch.rand(1, 4, 8, device="cuda")
+    replay = routing_replay_manager.replays[0]
+
+    with shared_replay.stage(shared_replay.FALLTHROUGH), routing_replay.consumption_guard([part], 3):
+        for _ in range(3):
+            part(scores)
+
+    assert (replay.forward_index, replay.backward_index, len(replay.top_indices_list)) == (0, 0, 2)
+    with pytest.raises(RuntimeError, match="touched its queue"):
+        with shared_replay.stage(shared_replay.FALLTHROUGH), routing_replay.consumption_guard([part], 1):
+            replay.pop_forward()
+
+
 def test_the_reference_model_is_left_alone(part):
     """Only the actor's routers replay; a second trainer's parts must not be
     held to the actor's queues."""
