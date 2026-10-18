@@ -9,7 +9,7 @@ import torch.nn.functional as F
 from torch.distributed.tensor import DTensor
 
 from miles.backends.training_utils.replay.routing_replay import FALLTHROUGH, REPLAY_BACKWARD, REPLAY_FORWARD, stage
-from miles.utils.replay_base import routing_replay_manager
+from miles.utils.replay_base import Replay, routing_replay_manager
 
 logger = logging.getLogger(__name__)
 
@@ -134,17 +134,30 @@ def _end_initialization() -> None:
     _initializing = None
 
 
+def _replays_of(model_parts: list[nn.Module]) -> list[Replay]:
+    """The queues of these parts' routers. The manager holds every installed
+    trainer's queues (the reference model's routers register under the same
+    layer indices as the actor's), and a pass only moves its own."""
+    return [
+        module.routing_replay
+        for part in model_parts
+        for module in part.modules()
+        if isinstance(getattr(module, "routing_replay", None), Replay)
+    ]
+
+
 @contextlib.contextmanager
 def consumption_guard(model_parts: list[nn.Module], expected: int):
     if not _is_installed(model_parts):
         yield
         return
-    before = {id(replay): (replay.forward_index, replay.backward_index) for replay in routing_replay_manager.replays}
+    replays = _replays_of(model_parts)
+    before = {id(replay): (replay.forward_index, replay.backward_index) for replay in replays}
     try:
         yield
     finally:
         _end_initialization()
-    for replay in routing_replay_manager.replays:
+    for replay in replays:
         forward_before, backward_before = before[id(replay)]
         advance = replay.forward_index - forward_before
         if advance != expected:
