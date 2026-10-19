@@ -37,7 +37,7 @@ from miles.ray.train_actor import TrainRayActor
 from miles.utils.audit_utils.witness.allocator import WitnessInfo
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.flops_utils import flops_args_from_hf_config, fwd_tflops_per_gpu
-from miles.utils.memory_utils import clear_memory, print_memory
+from miles.utils.memory_utils import clear_memory, print_memory, release_host_memory
 from miles.utils.object_store import StoreObjectRef
 from miles.utils.profile_utils import TrainProfiler
 from miles.utils.timer import inverse_timer, timer
@@ -141,7 +141,9 @@ class TorchNativeTrainRayActor(TrainRayActor):
     def _move_to(self, device: str) -> None:
         print_memory(f"before moving the model to {device}")
         move_train_state(self.model_parts, self.optimizers, device)
-        clear_memory()
+        # the host cache holds the pinned staging buffers of the move and the
+        # replay queues' pinned entries; on the way to the host both are done with
+        clear_memory(clear_host_memory=device == "cpu")
         dist.barrier(group=get_gloo_group())
         print_memory(f"after moving the model to {device}", processes=device == "cpu")
 
@@ -167,6 +169,10 @@ class TorchNativeTrainRayActor(TrainRayActor):
                 if self.args.debug_rollout_only:
                     return TrainStepOutput(outcome=TrainStepOutcome.NORMAL)
                 self._train_core(rollout_id=rollout_id, rollout_data=rollout_data)
+            # the deserialised shard and its CPU copies are this step's peak; hand
+            # them back now instead of carrying the largest step so far
+            del rollout_data
+            release_host_memory()
 
         perf.log_perf_data_raw(
             rollout_id=rollout_id,
