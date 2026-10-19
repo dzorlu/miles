@@ -110,7 +110,7 @@ class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
             print_memory(f"before releasing the GPU cache for {device}")
             clear_memory()
             dist.barrier(group=get_gloo_group())
-            print_memory(f"after releasing the GPU cache for {device}")
+            print_memory(f"after releasing the GPU cache for {device}", processes=device == "cpu")
             return
         super()._move_to(device)
 
