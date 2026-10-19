@@ -108,7 +108,7 @@ class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
         if self.args.optimizer_cpu_offload:
             # the training state already lives on the host; moving it would pull it all onto the GPU on wake
             print_memory(f"before releasing the GPU cache for {device}")
-            clear_memory()
+            clear_memory(clear_host_memory=device == "cpu")
             dist.barrier(group=get_gloo_group())
             print_memory(f"after releasing the GPU cache for {device}", processes=device == "cpu")
             return
