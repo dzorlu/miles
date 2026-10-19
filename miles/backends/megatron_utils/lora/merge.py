@@ -62,9 +62,11 @@ class MergedLoRAWeights(Mapping):
             assert 0 <= expert < lora_a.shape[0], f"{name}: expert {expert} is not local ({lora_a.shape[0]} local)"
             lora_a, lora_b = lora_a[expert], lora_b[expert]
         device = torch.device("cuda", torch.cuda.current_device()) if torch.cuda.is_available() else base.device
-        delta = lora_b.to(device, torch.float32) @ lora_a.to(device, torch.float32)
+        # Move first, widen on the device: one .to(cuda, float32) from a host tensor converts on the
+        # CPU (the base is the pinned torch_memory_saver backup); bf16 -> fp32 is exact either way.
+        delta = lora_b.to(device).float() @ lora_a.to(device).float()
         assert delta.shape == base.shape, f"{name}: LoRA delta {tuple(delta.shape)} vs base {tuple(base.shape)}"
-        return (base.to(device, torch.float32) + self._scale * delta).to(base.dtype)
+        return (base.to(device).float() + self._scale * delta).to(base.dtype)
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._weights)
