@@ -70,6 +70,10 @@ class TestResolveRequestArgsByConfig:
         assert wire["lora_path"] == LORA_ADAPTER_NAME
         wire, _ = resolve_request_args_by_config({}, make_session_server_config(lora_rank=8, lora_train_only=True))
         assert "lora_path" not in wire
+        # --lora-sync-merged engines serve merged base weights and enable no LoRA: naming the
+        # adapter gets every request a 400 (miles-cwpsi-muse-9a77705a, 2026-10-18)
+        wire, _ = resolve_request_args_by_config({}, make_session_server_config(lora_rank=8, lora_sync_merged=True))
+        assert "lora_path" not in wire
         wire, _ = resolve_request_args_by_config({}, make_session_server_config())
         assert "lora_path" not in wire
 
