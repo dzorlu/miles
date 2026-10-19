@@ -54,7 +54,7 @@ from miles.utils.context_utils import with_defer
 from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.ft_utils.indep_dp import IndepDPInfo
 from miles.utils.lora.utils import build_lora_config, is_multi_lora_enabled
-from miles.utils.memory_utils import clear_memory, print_memory
+from miles.utils.memory_utils import clear_memory, print_memory, release_host_memory
 from miles.utils.object_store import StoreObjectRef, ValueSpec
 from miles.utils.reloadable_process_group import destroy_process_groups, monkey_patch_torch_dist, reload_process_groups
 from miles.utils.replay_base import all_replay_managers, routing_replay_manager
@@ -619,7 +619,13 @@ class MegatronTrainRayActor(TrainRayActor):
                 )
 
             self._publish_model_companion_info(rollout_id=rollout_id, attempt=attempt, result=result)
-            return result
+
+        # the deserialised shard and its CPU copies are this step's peak; hand them
+        # back now instead of carrying the largest step so far (sleep empties only
+        # the pinned cache)
+        del rollout_data
+        release_host_memory()
+        return result
 
     @with_logs
     def _train_critic(self, rollout_id: int, rollout_data: RolloutBatch) -> TrainStepOutput:
