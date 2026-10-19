@@ -142,7 +142,7 @@ class TorchNativeTrainRayActor(TrainRayActor):
         move_train_state(self.model_parts, self.optimizers, device)
         clear_memory()
         dist.barrier(group=get_gloo_group())
-        print_memory(f"after moving the model to {device}")
+        print_memory(f"after moving the model to {device}", processes=device == "cpu")
 
     def train(
         self,
