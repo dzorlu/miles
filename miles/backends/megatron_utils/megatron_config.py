@@ -378,11 +378,11 @@ def resolve_args_checkpoint_load(args: Namespace) -> None:
         # Fresh runs pass a not-yet-created `--load` dir; fall back to the reference
         # weights (loaded via the HF bridge) instead of asserting in load_checkpoint.
         # Mirrors the non-bridge branch below.
-        if not has_megatron_checkpoint(args.load):
+        if not has_checkpoint(args.load):
             args.load = args.ref_load or args.hf_checkpoint
             args.start_rollout_id = 0
     else:
-        if not has_megatron_checkpoint(args.load):
+        if not has_checkpoint(args.load):
             args.no_load_optim = True
             args.no_load_rng = True
             args.finetune = True
@@ -392,12 +392,30 @@ def resolve_args_checkpoint_load(args: Namespace) -> None:
             args.start_rollout_id = 0
 
 
+def has_checkpoint(load_dir: str | None) -> bool:
+    """A saved run under ``--load`` from either training backend. Without one
+    the run starts from the reference weights; with one the backend's own
+    loader resumes from it, so ``--load`` and ``--start-rollout-id`` must be
+    left alone here."""
+    return has_megatron_checkpoint(load_dir) or _has_torchtitan_checkpoint(load_dir)
+
+
 def has_megatron_checkpoint(load_dir: str | None) -> bool:
     return (
         load_dir is not None
         and os.path.exists(load_dir)
         and os.path.exists(os.path.join(load_dir, "latest_checkpointed_iteration.txt"))
     )
+
+
+def _has_torchtitan_checkpoint(load_dir: str | None) -> bool:
+    """The torchtitan backend writes no tracker file: a save is
+    ``<load>/torchtitan/actor/checkpoint/step-N`` and its actor resumes from
+    the highest step (torchtitan_utils.config)."""
+    if load_dir is None:
+        return False
+    folder = os.path.join(load_dir, "torchtitan", "actor", "checkpoint")
+    return os.path.isdir(folder) and any(name.startswith("step-") for name in os.listdir(folder))
 
 
 # ---------------------------- validation -----------------------------

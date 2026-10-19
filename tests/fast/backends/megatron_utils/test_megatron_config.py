@@ -14,10 +14,12 @@ from miles.backends.megatron_utils import megatron_config as megatron_config_mod
 from miles.backends.megatron_utils.megatron_config import (
     MODEL_DEFINITION_ARGS,
     PER_POLICY_ARGS,
+    _has_torchtitan_checkpoint,
     _resolve_overrides,
     compute_trainer_args,
     compute_trainer_checkpoint_dir,
     get_megatron_arg_parser,
+    has_checkpoint,
     has_megatron_checkpoint,
     resolve_args_checkpoint_load,
     resolve_megatron_config,
@@ -914,3 +916,49 @@ class TestOverrideWhitelistShape:
         ]
 
         assert misspelled == []
+
+
+def _load_args(load, mode="raw"):
+    return SimpleNamespace(
+        load=load,
+        ref_load="/ref",
+        hf_checkpoint="/hf",
+        megatron_to_hf_mode=mode,
+        ref_ckpt_step=None,
+        ckpt_step=None,
+        start_rollout_id=None,
+        no_load_optim=False,
+        no_load_rng=False,
+        finetune=False,
+    )
+
+
+class TestResolveArgsCheckpointLoadKnowsBothBackends:
+    """``--load`` pointing at a torchtitan save (``torchtitan/actor/checkpoint/step-N``,
+    no tracker file) is a checkpoint: the resolver leaves ``--load`` and the start
+    rollout alone for the torchtitan actor to resume from. Before, it rewrote
+    ``--load`` to ``--ref-load`` and the run silently started from the base weights."""
+
+    def test_a_torchtitan_save_keeps_load_and_the_start_rollout(self, tmp_path):
+        (tmp_path / "torchtitan" / "actor" / "checkpoint" / "step-2").mkdir(parents=True)
+        for mode in ("raw", "bridge"):
+            args = _load_args(str(tmp_path), mode)
+            resolve_args_checkpoint_load(args)
+            assert (args.load, args.start_rollout_id, args.finetune) == (str(tmp_path), None, False)
+        assert _has_torchtitan_checkpoint(str(tmp_path)) and not has_megatron_checkpoint(str(tmp_path))
+
+    def test_a_dir_without_a_save_falls_back_to_the_reference_weights(self, tmp_path):
+        (tmp_path / "torchtitan" / "actor" / "checkpoint").mkdir(parents=True)
+        args = _load_args(str(tmp_path))
+        resolve_args_checkpoint_load(args)
+        assert (args.load, args.start_rollout_id, args.finetune, args.no_load_optim) == ("/ref", 0, True, True)
+        bridge = _load_args(str(tmp_path), "bridge")
+        resolve_args_checkpoint_load(bridge)
+        assert (bridge.load, bridge.start_rollout_id) == ("/ref", 0)
+        assert not _has_torchtitan_checkpoint(str(tmp_path)) and not _has_torchtitan_checkpoint(None)
+
+    def test_a_megatron_save_is_still_a_checkpoint(self, tmp_path):
+        (tmp_path / "latest_checkpointed_iteration.txt").write_text("3")
+        args = _load_args(str(tmp_path))
+        resolve_args_checkpoint_load(args)
+        assert (args.load, args.start_rollout_id) == (str(tmp_path), None)
