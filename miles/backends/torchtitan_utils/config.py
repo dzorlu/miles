@@ -52,6 +52,20 @@ def _latest_step_dir(load_root: str, dump_subdir: str) -> str | None:
     return os.path.join(folder, f"step-{max(steps)}") if steps else None
 
 
+def resume_step_dir(load_root: str | None, dump_subdir: str, hf_assets_path: str) -> str | None:
+    """The step directory the trainer of ``dump_subdir`` resumes from, or None
+    for a start from the HF weights. A ``--load`` that holds no actor
+    checkpoint is said out loud: a resume that silently starts over cost a
+    run its trained steps."""
+    resume_from = _latest_step_dir(load_root, dump_subdir) if load_root else None
+    if resume_from is None and load_root and dump_subdir == "actor":
+        logger.warning(
+            f"--load {load_root} holds no torchtitan checkpoint (no torchtitan/{dump_subdir}/checkpoint/step-*); "
+            f"the actor starts from the HF weights at {hf_assets_path}, at step 0"
+        )
+    return resume_from
+
+
 def build_trainer_config(args: Namespace, *, hf_assets_path: str, lr_total_steps: int, dump_subdir: str):
     if args.optimizer != "adam":
         raise ValueError(f"torchtitan backend supports --optimizer adam, got {args.optimizer!r}")
@@ -126,7 +140,7 @@ def build_trainer_config(args: Namespace, *, hf_assets_path: str, lr_total_steps
 
     config.checkpoint.enable = True
     config.checkpoint.last_save_model_only = False
-    resume_from = _latest_step_dir(args.load, dump_subdir) if args.load else None
+    resume_from = resume_step_dir(args.load, dump_subdir, hf_assets_path)
     if resume_from is None:
         config.checkpoint.initial_load_model_only = True
         config.checkpoint.initial_load_in_hf = True
