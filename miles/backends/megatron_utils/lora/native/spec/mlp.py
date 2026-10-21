@@ -127,3 +127,10 @@ class FusedGateUpMLPSpec(LayoutSpec):
             ),
         ),
     )
+
+
+class FrozenMLPSpec(LayoutSpec):
+    """No adapter on dense MLPs or MLP-shaped shared experts (Muse Spark adapts only its routed experts)."""
+
+    name = "frozen_mlp"
+    layout = ModuleLayout(name="frozen_mlp")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import torch
 import torch.nn as nn
 
 from miles.backends.megatron_utils.lora.native.modules.linear import (
@@ -279,6 +280,121 @@ class InklingAttentionSpec(AttentionSpecBase):
             ),
         ),
     )
+
+
+class _MuseSparkSplitQGKV(LoRASplitAdapter):
+    """Independent q/gate/k/v adapters over Muse Spark's fused ``linear_qkv``.
+
+    The adapters live in the checkpoint's frame: each ``B`` has the rows of the HF ``q_proj`` /
+    ``gate_proj`` / ``k_proj`` / ``v_proj`` weight (q and k rows with the two rotary halves of a head
+    consecutive). ``out_perm`` maps that plain concat onto the fused rows MCore keeps per query group,
+    ``[q heads; gate heads; k; v]`` with the rotary pairs interleaved, the inverse of
+    ``MuseSpark1xParamMapping``'s ``qgkv`` conversion.
+    """
+
+    def __init__(self, *, rows_by_param_prefix: dict[str, int], num_q: int, num_kv: int, head_dim: int, **kwargs):
+        super().__init__(rows_by_param_prefix=rows_by_param_prefix, **kwargs)
+        permutation = build_muse_spark_qgkv_permutation(num_q, num_kv, head_dim, "gate" in rows_by_param_prefix)
+        self.register_buffer("out_perm", permutation.to(kwargs["reference"].device), persistent=False)
+        # The merged weight sync runs while a colocated trainer is offloaded, when ``out_perm`` (allocated with
+        # the model) is paused; the merge packs rows with this host copy instead.
+        self._host_out_perm = permutation
+
+    def _pack(self, delta: torch.Tensor) -> torch.Tensor:
+        return delta.index_select(-1, self.out_perm)
+
+    def _pack_rows(self, delta: torch.Tensor) -> torch.Tensor:
+        return delta.index_select(0, self._host_out_perm.to(delta.device))
+
+
+def build_muse_spark_qgkv_permutation(
+    num_q: int, num_kv: int, head_dim: int, output_gate: bool, device=None
+) -> torch.Tensor:
+    """Index of the plain ``[q; gate; k; v]`` row (checkpoint frame) that feeds each fused MCore row."""
+    assert head_dim % 2 == 0, f"Muse Spark rotary pairs need an even head_dim, got {head_dim}"
+    q_rows, kv_rows = num_q * head_dim, num_kv * head_dim
+
+    def to_kernel_order(rows: torch.Tensor) -> torch.Tensor:
+        # per head: (first halves, second halves) -> interleaved rotary pairs (weight_mapping.rope_pairs_hf_to_kernel)
+        return rows.reshape(-1, 2, head_dim // 2).transpose(1, 2).reshape(-1)
+
+    offset = 0
+    pieces = []
+    for name, rows in (("q", q_rows), ("gate", q_rows if output_gate else 0), ("k", kv_rows), ("v", kv_rows)):
+        if not rows:
+            continue
+        index = torch.arange(offset, offset + rows)
+        offset += rows
+        if name in ("q", "k"):
+            index = to_kernel_order(index)
+        pieces.append(index.reshape(num_kv, -1))
+    return torch.cat(pieces, dim=1).reshape(-1).to(device)
+
+
+def _build_muse_spark_split_qgkv(
+    attention: nn.Module,
+    hf_prefix: str,
+    context: AttachContext,
+    active: tuple[ProjectionSpec, ...],
+) -> _MuseSparkSplitQGKV:
+    num_q = attention.num_attention_heads_per_partition
+    num_kv = attention.num_query_groups_per_partition
+    head_dim = attention.hidden_size_per_attention_head
+    rows = {"q": num_q * head_dim}
+    if context.output_gate:
+        rows["gate"] = num_q * head_dim
+    rows.update(k=num_kv * head_dim, v=num_kv * head_dim)
+    assert sum(rows.values()) == attention.linear_qkv.weight.shape[0], (
+        f"Muse Spark linear_qkv has {attention.linear_qkv.weight.shape[0]} local rows, the q/gate/k/v layout "
+        f"{rows} sums to {sum(rows.values())}"
+    )
+    return _MuseSparkSplitQGKV(
+        hf_prefix=hf_prefix,
+        reference=attention.linear_qkv.weight,
+        context=context,
+        projections=tuple(projection for projection in active if projection.param_prefix in rows),
+        rows_by_param_prefix=rows,
+        num_q=num_q,
+        num_kv=num_kv,
+        head_dim=head_dim,
+    )
+
+
+class MuseSparkAttentionSpec(AttentionSpecBase):
+    """Muse Spark's GQA: fused ``linear_qkv`` holding q, the output gate (``gate_proj``), k and v per
+    query group, plus the row-parallel ``o_proj``. Without the output gate the gate slot is absent."""
+
+    name = "muse_spark"
+    family = AttentionFamily.GQA
+    layout = ModuleLayout(
+        name="muse_spark_attention",
+        present_when_attr="linear_qkv",
+        fused=(
+            FusedAttach(
+                module_attr="linear_qkv",
+                projections=(
+                    ProjectionSpec("q_proj", "q", ShardLayout.COLUMN),
+                    ProjectionSpec("gate_proj", "gate", ShardLayout.COLUMN),
+                    ProjectionSpec("k_proj", "k", ShardLayout.COLUMN),
+                    ProjectionSpec("v_proj", "v", ShardLayout.COLUMN),
+                ),
+                adapter_attr="lora_qkv_adapter",
+                build=_build_muse_spark_split_qgkv,
+            ),
+        ),
+        singles=(
+            ProjectionBinding(
+                projection=ProjectionSpec("o_proj", "o", ShardLayout.ROW),
+                module_attr="linear_proj",
+                in_dim=L.gqa_o_in_local,
+                out_dim=L.hidden_size,
+                adapter_attr="lora_o_adapter",
+            ),
+        ),
+    )
+
+    def validate(self, config, *, tp_size: int) -> None:
+        GQAAttentionSpec().validate(config, tp_size=tp_size)
 
 
 def _is_replicated_linear(module: nn.Module, full_out: int) -> bool:
