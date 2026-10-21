@@ -15,11 +15,12 @@ from miles.backends.megatron_utils.lora.native.spec.attention import (
     InklingAttentionSpec,
     KimiK3AttentionSpec,
     MLAAttentionSpec,
+    MuseSparkAttentionSpec,
 )
 from miles.backends.megatron_utils.lora.native.spec.base import FixedTargets, LoRAArchSpec
 from miles.backends.megatron_utils.lora.native.spec.layout import AttentionSpecBase
 from miles.backends.megatron_utils.lora.native.spec.lm_head import InklingLMHeadSpec
-from miles.backends.megatron_utils.lora.native.spec.mlp import FusedGateUpMLPSpec, SplitGateUpMLPSpec
+from miles.backends.megatron_utils.lora.native.spec.mlp import FrozenMLPSpec, FusedGateUpMLPSpec, SplitGateUpMLPSpec
 from miles.backends.megatron_utils.lora.native.spec.moe import GroupedExpertsSpec
 from miles.utils.lora.hf_lora_targets import resolve_hf_lora_targets
 from miles.utils.lora.utils import lora_rollout_enabled, matches_lora_target
@@ -75,6 +76,41 @@ def _kimi_k3_arch_spec() -> LoRAArchSpec:
     )
 
 
+# The HF modules Muse Spark's native LoRA adapts, as its adapters are named (DeclaredNaming below): the fused
+# attention qkv (q, output gate, k, v), the attention output, and every routed expert's gate/up (w1/w3) and down (w2).
+MUSE_SPARK_LORA_TARGETS = (
+    "self_attn.q_proj",
+    "self_attn.gate_proj",
+    "self_attn.k_proj",
+    "self_attn.v_proj",
+    "self_attn.o_proj",
+    "mlp.experts.w1",
+    "mlp.experts.w3",
+    "mlp.experts.w2",
+)
+
+
+def _muse_spark_arch_spec() -> LoRAArchSpec:
+    """Muse Spark: attention qkv + output and the routed experts' fc1/fc2 (shared-outer); router, norms,
+    embeddings, output layer, the expert latent projections and dense MLPs stay frozen.
+
+    SGLang's Muse Spark model serves no LoRA, so the adapters reach the engines merged into the base weights
+    (``--lora-sync-merged``); their names only label adapter checkpoints, after the HF checkpoint's modules.
+    """
+    attention = MuseSparkAttentionSpec()
+    return LoRAArchSpec(
+        name=attention.name,
+        attention=attention,
+        mlp=FrozenMLPSpec(),
+        experts=GroupedExpertsSpec(),
+        declared_naming=DeclaredNaming(
+            "model.language_model.layers.",
+            {"self_attention.": "self_attn.", "mlp.experts.": "mlp.experts."},
+        ),
+        fixed_targets=FixedTargets(serving=lambda _targets: list(MUSE_SPARK_LORA_TARGETS), select_all=True),
+    )
+
+
 def _shared_outer_serving_targets(targets: list[str]) -> list[str]:
     """Shared-outer export stores the expert dimension in each tensor, not in its name."""
     return [target.replace(".experts.*.", ".experts.") for target in targets]
@@ -111,6 +147,7 @@ def _build_model_specs() -> dict[str, LoRAArchSpec]:
         "inkling_text": inkling,
         "inkling_model": inkling,
         "inkling_mm_model": inkling,
+        "muse_spark": _muse_spark_arch_spec(),
     }
 
 

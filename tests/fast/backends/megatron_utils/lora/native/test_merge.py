@@ -8,7 +8,7 @@ import torch.nn as nn
 from tests.fast.backends.megatron_utils.lora.native.naming_stub import named
 
 from miles.backends.megatron_utils.lora.native.config import LoRAConfig
-from miles.backends.megatron_utils.lora.native.merge import merge_lora_into_weights
+from miles.backends.megatron_utils.lora.native.merge import MergedWeights, merge_lora_into_weights
 from miles.backends.megatron_utils.lora.native.modules.linear import attach_adapter_forward
 from miles.backends.megatron_utils.lora.native.modules.lm_head import LoRAOutputHead
 from miles.backends.megatron_utils.lora.native.modules.moe import LoRAGroupedFC1, LoRAGroupedFC2, _grouped_linear
@@ -232,3 +232,29 @@ def test_unadapted_weights_pass_through_untouched():
     merged = _merged(module)
     assert merged["norm"] is module.norm
     assert merged["mlp.linear_fc1.weight"] is module.mlp.linear_fc1.weight
+
+
+def _bf16_weight_and_delta():
+    torch.manual_seed(0)
+    weight = torch.randn(64, 32).to(torch.bfloat16)
+    delta = torch.randn(64, 32)
+    return weight, delta
+
+
+def test_merged_weight_keeps_the_dtype_and_matches_the_fp32_sum_exactly():
+    weight, delta = _bf16_weight_and_delta()
+    merged = MergedWeights({"w": weight}, {id(weight): lambda: delta})["w"]
+    assert merged.dtype == torch.bfloat16 and merged.device == delta.device
+    assert torch.equal(merged, (weight.float() + delta).to(torch.bfloat16))
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="needs a GPU")
+def test_a_pinned_host_weight_merges_on_the_gpu_bit_identically():
+    """The host weight is copied to the delta's GPU and widened there; the result stays on that GPU."""
+    weight, delta = _bf16_weight_and_delta()
+    expected = (weight.float() + delta).to(torch.bfloat16)
+    pinned = weight.pin_memory()
+    gpu_delta = delta.cuda()
+    merged = MergedWeights({"w": pinned}, {id(pinned): lambda: gpu_delta})["w"]
+    assert merged.is_cuda and merged.dtype == torch.bfloat16
+    assert torch.equal(merged.cpu(), expected)

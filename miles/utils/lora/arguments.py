@@ -2,6 +2,7 @@ import logging
 from typing import Any
 
 from miles.backends.megatron_utils.lora.native import resolve_adapter_targets, validate_native_lora_args
+from miles.backends.megatron_utils.lora.native.registry import resolve_config_spec
 from miles.utils.hf_utils.config import load_hf_config
 from miles.utils.hf_utils.weight_mapping import HfWeightMapping
 from miles.utils.lora.hf_lora_targets import (
@@ -100,6 +101,16 @@ def add_lora_arguments(parser):
         ),
     )
     parser.add_argument(
+        "--lora-sync-merged",
+        action="store_true",
+        default=False,
+        help=(
+            "Train native LoRA adapters in Megatron and sync the base weights with the adapters merged in "
+            "(W + alpha/rank * B @ A per local shard) on every weight update; the engines serve no LoRA. "
+            "For models whose SGLang implementation has no LoRA support (Muse Spark)."
+        ),
+    )
+    parser.add_argument(
         "--experts-shared-outer-loras",
         action="store_true",
         default=False,
@@ -146,6 +157,9 @@ def validate_lora_args(args):
     assert args.train_backend == "megatron", "LoRA injection is not implemented for FSDP; use --train-backend megatron"
     assert args.lora_rank > 0, "LoRA requires a positive --lora-rank, including when loading an adapter"
     hf_config = load_hf_config(args.hf_checkpoint)
+    if getattr(args, "lora_sync_merged", False) or getattr(hf_config, "model_type", None) in _MERGED_SYNC_MODEL_TYPES:
+        _validate_merged_lora_args(args, hf_config)
+        return
     args.hf_lora_targets, args.lora_adapter_targets = _resolve_lora_targets(args, hf_config)
 
     # Training and serving must agree on shared-outer grouped-expert LoRA (expert_dim=1).
@@ -159,6 +173,32 @@ def validate_lora_args(args):
             "MoE-expert LoRA layout: %s (--experts-shared-outer-loras).",
             "shared-outer" if args.experts_shared_outer_loras else "per-expert",
         )
+
+
+# Native LoRA specs whose SGLang model serves no LoRA: they train only with --lora-sync-merged.
+_MERGED_SYNC_MODEL_TYPES = frozenset({"muse_spark"})
+
+
+def _validate_merged_lora_args(args, hf_config) -> None:
+    """``--lora-sync-merged`` trains the model's fixed native adapter set; the engines see merged base weights."""
+    model_type = hf_config.model_type
+    assert args.lora_sync_merged, (
+        f"{model_type}'s SGLang model serves no LoRA: train its native LoRA with --lora-sync-merged, "
+        "which syncs the base weights with the adapters merged in"
+    )
+    assert model_type in _MERGED_SYNC_MODEL_TYPES, (
+        f"--lora-sync-merged is implemented for {sorted(_MERGED_SYNC_MODEL_TYPES)} native LoRA only "
+        f"(model_type {model_type!r})"
+    )
+    assert args.megatron_to_hf_mode == "raw", "--lora-sync-merged merges into the raw Megatron weights"
+    assert not args.lora_train_only, "--lora-sync-merged updates the engines; --lora-train-only keeps them frozen"
+    assert args.target_modules is None and not args.exclude_modules, (
+        f"{model_type} native LoRA adapts a fixed set (MODEL_SPECS[{model_type!r}] in "
+        "miles/backends/megatron_utils/lora/native/registry.py); omit --target-modules and --exclude-modules"
+    )
+    assert args.lora_type == "lora", f"{model_type} native LoRA does not implement --lora-type canonical_lora"
+    _model_type, spec = resolve_config_spec(hf_config.to_dict())
+    args.hf_lora_targets = args.lora_adapter_targets = list(spec.fixed_targets.serving([]))
 
 
 def validate_lora_args_after_megatron(args):
