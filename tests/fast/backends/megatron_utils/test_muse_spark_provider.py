@@ -29,6 +29,7 @@ from tests.fast.backends.megatron_utils.muse_spark_test_utils import build_model
 from miles.backends.megatron_utils.parallel import get_packed_seq_params
 from miles.backends.training_utils import parallel as training_parallel
 from miles.backends.training_utils.data.rollout import DataIterator, get_batch
+from miles.platforms import current_platform
 from miles_plugins.models.muse_spark import provider
 from miles_plugins.models.muse_spark.config import MuseSpark1xConfig, parse_muse_spark_1x_config
 from miles_plugins.models.muse_spark.model import MuseSpark1xGPTModel
@@ -440,6 +441,7 @@ def _miles_packed_batch(monkeypatch, lengths, tp_size):
     state = SimpleNamespace(tp=SimpleNamespace(size=tp_size), cp=SimpleNamespace(size=1, rank=0))
     monkeypatch.setattr(training_parallel, "_parallel_state", state)
     monkeypatch.setattr(torch.Tensor, "cuda", lambda self: self)
+    monkeypatch.setattr(current_platform, "current_device", lambda: torch.device("cpu"))
     rollout = {
         "tokens": [torch.arange(length) for length in lengths],
         "loss_masks": [torch.ones(length - 1) for length in lengths],
