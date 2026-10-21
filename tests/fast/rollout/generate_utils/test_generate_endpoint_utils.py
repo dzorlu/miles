@@ -139,3 +139,26 @@ def test_sample_keeps_the_expanded_prompt_ids():
     sample = Sample()
     asyncio.run(update_sample_from_response(_args(), sample, payload=payload, output=output))
     assert sample.tokens == payload["input_ids"] + [7, 8]
+
+
+def test_expanded_on_wire_families_send_the_processor_ids_as_they_are(monkeypatch):
+    """Muse Spark: the engine runs expanded images as sent, so nothing collapses;
+    a Muse Spark processor without a TITO family (single-turn VLM runs) counts too."""
+    import miles.rollout.generate_utils.generate_endpoint_utils as m
+    from miles.rollout.generate_utils.generate_endpoint_utils import images_expanded_on_wire
+    from miles.utils.chat_template_utils.tito_tokenizer import MUSE_SPARK_IMAGE_TOKENS
+
+    monkeypatch.setattr(m, "encode_image_for_rollout_engine", lambda image: f"b64:{image}")
+    expanded = [1, 200080] + [200092] * 5 + [200081, 2]
+    payload, status = compute_request_payload(
+        _args(), expanded, {}, multimodal_inputs={"images": ["img"]}, image_pad_id=200092, collapse_images=False
+    )
+    assert status is None and payload["input_ids"] == expanded
+    payload, _ = compute_request_payload(
+        _args(), expanded, {}, multimodal_inputs={"images": ["img"]}, image_pad_id=None, collapse_images=False
+    )
+    assert payload["input_ids"] == expanded
+    muse_family = SimpleNamespace(tito_tokenizer=SimpleNamespace(image_tokens=MUSE_SPARK_IMAGE_TOKENS))
+    assert images_expanded_on_wire(muse_family)
+    assert images_expanded_on_wire(SimpleNamespace(processor=SimpleNamespace(image_patches=lambda image: None)))
+    assert not images_expanded_on_wire(SimpleNamespace(processor=SimpleNamespace(image_token="<|image_pad|>")))

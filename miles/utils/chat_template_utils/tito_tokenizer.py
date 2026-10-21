@@ -105,6 +105,15 @@ class ImageTokens:
     placeholder: str
     end: str | None
     expands: bool = True
+    #: The engine keeps an already expanded image (begin, the placeholder
+    #: repeated, end) as it is but does not expand a single placeholder
+    #: between the markers, so requests carry the expanded ids, the same ids
+    #: the record holds (Muse Spark).
+    expanded_on_wire: bool = False
+    #: Text the family's chat template writes for one image in place of the
+    #: three tokens; rendering rewrites it to begin + placeholder + end before
+    #: tokenizing, so the ids hold the markers whatever the text around it.
+    template_text: str | None = None
 
     @property
     def tokens(self) -> tuple[str, ...]:
@@ -119,6 +128,14 @@ QWEN3_VL_IMAGE_TOKENS = ImageTokens("<|vision_start|>", "<|image_pad|>", "<|visi
 #: ``<|image|>`` with one copy per merged patch; the position math of the
 #: model needs the begin and end markers around each run.
 GLM_V_IMAGE_TOKENS = ImageTokens("<|begin_of_image|>", "<|image|>", "<|end_of_image|>")
+#: Muse Spark: the fixed template writes ``<image>`` (three text tokens); the
+#: engine and the train processor both turn it into ``<|image_start|>``,
+#: ``<|patch|>`` once per image token, ``<|image_end|>``. The engine runs such
+#: an expanded block as sent (sglang muse_spark_omni ``_replace_unexpanded_hf_markers``)
+#: but would read a single ``<|patch|>`` between the markers as a 1-token image.
+MUSE_SPARK_IMAGE_TOKENS = ImageTokens(
+    "<|image_start|>", "<|patch|>", "<|image_end|>", expanded_on_wire=True, template_text="<image>"
+)
 
 
 # ---------------------------------------------------------------------------
@@ -285,6 +302,15 @@ class TITOTokenizer:
         # TODO: Use the unified kwargs resolver for launch and request arguments once
         # available, then check whether callers still need this default fallback.
         args = self.chat_template_kwargs if template_args is None else template_args
+        if tokenize and self.image_tokens is not None and self.image_tokens.template_text is not None:
+            text = template.apply_chat_template(
+                messages,
+                tokenizer=self.tokenizer,
+                tokenize=False,
+                add_generation_prompt=add_generation_prompt,
+                **args,
+            )
+            return self._encode_text(text)
         return template.apply_chat_template(
             messages,
             tokenizer=self.tokenizer,
@@ -317,7 +343,15 @@ class TITOTokenizer:
         return list(request_messages)
 
     def _encode_text(self, text: str) -> list[int]:
-        return self.tokenizer.encode(text, add_special_tokens=False)
+        return self.tokenizer.encode(self._image_text_to_tokens(text), add_special_tokens=False)
+
+    def _image_text_to_tokens(self, text: str) -> str:
+        """``text`` with the family's per-image template text (``ImageTokens.template_text``)
+        replaced by its begin marker, placeholder and end marker."""
+        tokens = self.image_tokens
+        if tokens is None or tokens.template_text is None:
+            return text
+        return text.replace(tokens.template_text, "".join(tokens.tokens))
 
     def image_token_ids(self) -> dict[str, int] | None:
         """The ids of the family's image tokens in this tokenizer, keyed
@@ -1086,6 +1120,7 @@ class MuseSparkTITOTokenizer(TITOTokenizer):
     FIXED_TEMPLATE = FixedTemplate(template="muse_spark_fixed.jinja")
     reasoning_parser = "muse"
     tool_call_parser = "muse"
+    image_tokens = MUSE_SPARK_IMAGE_TOKENS
 
     def __init__(
         self,

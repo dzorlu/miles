@@ -28,6 +28,7 @@ from miles.rollout.session.errors import (
 from miles.rollout.session.linear_trajectory import SessionRegistry
 from miles.rollout.session.media import (
     MediaStore,
+    expand_image_placeholders,
     expanded_length,
     media_references,
     normalize_messages,
@@ -225,11 +226,22 @@ def store_request_media(client_args: dict, media: MediaStore | None) -> dict:
 
 def engine_request_body(request_body: dict, media: MediaStore | None) -> bytes:
     """The proxied body: the stored ``mm://`` references become the client's
-    data URLs again, so the engine receives the images with the ids."""
+    data URLs again, so the engine receives the images with the ids. A family
+    whose engine runs only expanded images (``MediaStore.expanded_on_wire``)
+    gets each placeholder expanded to the image's token count, the ids the
+    sample will hold."""
+    # orjson: the body carries the whole prompt's input_ids on every turn.
     if media is None:
         return orjson.dumps(request_body)
     messages = request_body.get("messages")
-    if isinstance(messages, list) and media_references(messages):
+    refs = media_references(messages) if isinstance(messages, list) else []
+    if refs:
+        if media.expanded_on_wire and "input_ids" in request_body:
+            counts = [media.get(ref).num_tokens for ref in refs]
+            request_body = {
+                **request_body,
+                "input_ids": expand_image_placeholders(request_body["input_ids"], counts, media.image_pad_id),
+            }
         request_body = {**request_body, "messages": restore_messages(messages, media)}
     return orjson.dumps(request_body)
 

@@ -153,7 +153,7 @@ def expand_prompt_images(
             f"the engine ran {reported} prompt tokens but the session's expanded prompt has {len(expanded)} "
             f"({len(prompt_token_ids)} sent, {len(entries)} image(s)): the engine did not run the request ids as sent"
         )
-    return expanded, train_inputs(entries)
+    return expanded, train_inputs(entries, expanded, media.image_pad_id)
 
 
 def _compute_sample_from_openai_record(

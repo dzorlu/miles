@@ -21,6 +21,14 @@ The training sample ships the images as PNG bytes
 (``multimodal_train_inputs = {"image_png", "image_png_lengths",
 "image_grid_thw"}``); the trainer rebuilds pixel tensors per micro-batch
 from them.
+
+Muse Spark differs in two places. Its engine does not expand a single
+placeholder between the markers, so the request carries the expanded ids
+(``ImageTokens.expanded_on_wire``), which equal the record's. Its processor
+(``MuseSparkTrainProcessor.image_patches``) gives a ``(grid_h, grid_w)``
+grid, and its tower reads ``mm_vision_grids`` plus ``mm_vision_positions``
+(the sample-local indices of the ``<|patch|>`` tokens), so the sample ships
+those keys with the PNG bytes.
 """
 
 from __future__ import annotations
@@ -44,7 +52,7 @@ class MediaEntry:
     """One image as the trainer and the engine see it."""
 
     png: bytes
-    grid_thw: tuple[int, int, int]
+    grid_thw: tuple[int, ...]  # (t, h, w); Muse Spark: (grid_h, grid_w)
     num_tokens: int
     data_url: str  # what the engine receives; the client's exact bytes
 
@@ -86,13 +94,21 @@ class MediaStore:
     """Content-addressed images of one session, with the processor's count and grid."""
 
     def __init__(
-        self, processor: Any, image_pad_id: int | None, *, expands: bool = True, family: str | None = None
+        self,
+        processor: Any,
+        image_pad_id: int | None,
+        *,
+        expands: bool = True,
+        expanded_on_wire: bool = False,
+        family: str | None = None,
     ) -> None:
         self.processor = processor
         self.image_pad_id = image_pad_id
         #: The engine expands one placeholder into the image's token count
         #: (``ImageTokens.expands``); the samples expand the record the same way.
         self.expands = expands
+        #: The request carries the expanded ids (``ImageTokens.expanded_on_wire``).
+        self.expanded_on_wire = expanded_on_wire
         self.family = family
         self.entries: dict[str, MediaEntry] = {}
 
@@ -144,10 +160,14 @@ class MediaStore:
         return self.entries[reference[len(MEDIA_URL_PREFIX) :]]
 
 
-def image_grid_and_count(processor: Any, image: Any) -> tuple[tuple[int, int, int], int]:
+def image_grid_and_count(processor: Any, image: Any) -> tuple[tuple[int, ...], int]:
     """The image processor's grid and the number of tokens the image occupies
     after expansion, from the processor itself (``_get_num_multimodal_tokens``
-    is the transformers convention SGLang's exact-token path also uses)."""
+    is the transformers convention SGLang's exact-token path also uses; the
+    Muse Spark processor gives both from ``image_patches``)."""
+    if hasattr(processor, "image_patches"):
+        _, grid, count = processor.image_patches(image.convert("RGB"))
+        return tuple(int(v) for v in grid), int(count)
     output = processor.image_processor(images=[image], return_tensors="np")
     grid = tuple(int(v) for v in np.asarray(output["image_grid_thw"])[0].tolist())
     counts = processor._get_num_multimodal_tokens(image_sizes=[(image.height, image.width)]).num_image_tokens
@@ -262,11 +282,29 @@ def expanded_length(token_ids: list[int], messages: list[dict[str, Any]], media:
     return len(token_ids) - placeholders + sum(counts)
 
 
-def train_inputs(entries: list[MediaEntry]) -> dict[str, np.ndarray]:
-    """The images of one sample in the trainer's PNG format."""
+def train_inputs(
+    entries: list[MediaEntry], prompt_ids: list[int] | None = None, pad_id: int | None = None
+) -> dict[str, np.ndarray]:
+    """The images of one sample in the trainer's PNG format. Muse Spark
+    entries (2-value grids) ship ``mm_vision_grids`` and the indices of the
+    placeholder ``pad_id`` in the expanded ``prompt_ids`` as
+    ``mm_vision_positions`` instead of ``image_grid_thw``."""
     pngs = [entry.png for entry in entries]
-    return {
+    out = {
         "image_png": np.frombuffer(b"".join(pngs), dtype=np.uint8).copy(),
         "image_png_lengths": np.asarray([len(png) for png in pngs], dtype=np.int64),
-        "image_grid_thw": np.asarray([entry.grid_thw for entry in entries], dtype=np.int64).reshape(-1, 3),
     }
+    if entries and len(entries[0].grid_thw) == 2:
+        if prompt_ids is None or pad_id is None:
+            raise ValueError("Muse Spark images need the expanded prompt ids and the placeholder id")
+        positions = [i for i, t in enumerate(prompt_ids) if t == pad_id]
+        if len(positions) != sum(entry.num_tokens for entry in entries):
+            raise ValueError(
+                f"{len(positions)} image placeholder(s) in the expanded prompt but the images need "
+                f"{sum(entry.num_tokens for entry in entries)}"
+            )
+        out["mm_vision_grids"] = np.asarray([entry.grid_thw for entry in entries], dtype=np.int64).reshape(-1, 2)
+        out["mm_vision_positions"] = np.asarray(positions, dtype=np.int64)
+        return out
+    out["image_grid_thw"] = np.asarray([entry.grid_thw for entry in entries], dtype=np.int64).reshape(-1, 3)
+    return out
