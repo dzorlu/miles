@@ -26,6 +26,11 @@ class ProjectionExport:
     b_rows_full: int  # TP-gathered lora_B rows
 
 
+def live_tensor(parameter: nn.Parameter) -> torch.Tensor:
+    """The default reader of :meth:`NativeLoRAAdapter.weight_deltas`: the parameter itself."""
+    return parameter
+
+
 # kaiming/normal follow Megatron-Bridge's tensor-derived inits so --lora-A-init-method means the same on both paths.
 _LORA_A_INITS = {
     "xavier": nn.init.xavier_uniform_,
@@ -123,11 +128,15 @@ class NativeLoRAAdapter(nn.Module):
         del take
         return None
 
-    def weight_deltas(self) -> Iterator[tuple[nn.Parameter, Callable[[], torch.Tensor]]]:
+    def weight_deltas(
+        self, read: Callable[[nn.Parameter], torch.Tensor] = live_tensor
+    ) -> Iterator[tuple[nn.Parameter, Callable[[], torch.Tensor]]]:
         """``(host weight, delta thunk)`` pairs whose sum merges this adapter into its hosts.
 
         Each delta is scaled and laid out like the host's local shard, so a merged
         export can hand ``weight + delta`` to the ordinary base-weight converters.
+        A thunk reads each adapter parameter through ``read`` (default: the live
+        parameter), so a caller can compute it from another copy of the weights.
         """
         raise NotImplementedError(f"{type(self).__name__} does not implement weight merging")
 
@@ -212,11 +221,11 @@ class LoRALinear(NativeLoRAAdapter):
     def exports(self) -> Iterator[ProjectionExport]:
         yield from self._export_projections()
 
-    def weight_deltas(self):
+    def weight_deltas(self, read=live_tensor):
         (host,) = self._hosts
         a = getattr(self, f"{self.param_prefix}_A")
         b = getattr(self, f"{self.param_prefix}_B")
-        yield host.weight, lambda: self.context.lora.scale * (b.float() @ a.float())
+        yield host.weight, lambda: self.context.lora.scale * (read(b).float() @ read(a).float())
 
 
 class LoRAUnreducedRowLinear(LoRALinear):
@@ -303,16 +312,17 @@ class LoRASplitAdapter(NativeLoRAAdapter):
     def _pack_rows(self, delta: torch.Tensor) -> torch.Tensor:
         return self._pack(delta.t()).t()
 
-    def weight_deltas(self):
+    def weight_deltas(self, read=live_tensor):
         (host,) = self._hosts
 
         def delta() -> torch.Tensor:
+            active = {
+                name: read(getattr(self, f"{name}_B")).float() @ read(getattr(self, f"{name}_A")).float()
+                for name in self._active
+            }
+            reference = next(iter(active.values()))
             slots = [
-                (
-                    getattr(self, f"{name}_B").float() @ getattr(self, f"{name}_A").float()
-                    if name in self._active
-                    else host.weight.new_zeros(rows, host.weight.shape[1], dtype=torch.float32)
-                )
+                active[name] if name in active else reference.new_zeros(rows, host.weight.shape[1])
                 for name, rows in self._rows_by_param_prefix.items()
             ]
             return self.context.lora.scale * self._pack_rows(torch.cat(slots, dim=0))

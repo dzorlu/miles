@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from miles.backends.megatron_utils.lora.native.distributed import apply_lora_dropout, branch_input, reduce_row_parallel
-from miles.backends.megatron_utils.lora.native.modules.linear import NativeLoRAAdapter, new_lora_parameter
+from miles.backends.megatron_utils.lora.native.modules.linear import NativeLoRAAdapter, live_tensor, new_lora_parameter
 from miles.backends.megatron_utils.lora.native.spec.base import AttachContext
 
 
@@ -91,11 +91,14 @@ class LoRAGroupedFC1(NativeLoRAAdapter):
         up = _grouped_linear(joint[..., rank:].contiguous(), self.w3_B, tokens_per_expert)
         return torch.cat([gate, up], dim=-1)
 
-    def weight_deltas(self):
+    def weight_deltas(self, read=live_tensor):
         (host,) = self._hosts
         for index in range(self.w1_B.shape[0]):
             yield getattr(host, f"weight{index}"), lambda index=index: self.context.lora.scale * torch.cat(
-                [self.w1_B[index].float() @ self.w1_A.float(), self.w3_B[index].float() @ self.w3_A.float()]
+                [
+                    read(self.w1_B)[index].float() @ read(self.w1_A).float(),
+                    read(self.w3_B)[index].float() @ read(self.w3_A).float(),
+                ]
             )
 
     def export_plan(self, gather) -> list:
@@ -160,11 +163,11 @@ class LoRAGroupedFC2(NativeLoRAAdapter):
         )
         return F.linear(inner, self.w2_B)
 
-    def weight_deltas(self):
+    def weight_deltas(self, read=live_tensor):
         (host,) = self._hosts
         for index in range(self.w2_A.shape[0]):
             yield getattr(host, f"weight{index}"), lambda index=index: self.context.lora.scale * (
-                self.w2_B.float() @ self.w2_A[index].float()
+                read(self.w2_B).float() @ read(self.w2_A)[index].float()
             )
 
     def export_plan(self, gather) -> list:
@@ -250,15 +253,18 @@ class LoRASharedExpertsAdapter(NativeLoRAAdapter):
         local = F.linear(apply_lora_dropout(x, self.context, host.training), self.w2_A[index])
         return F.linear(reduce_row_parallel(local, self.context), self.w2_B)
 
-    def weight_deltas(self):
+    def weight_deltas(self, read=live_tensor):
         """Hosts are bound per sub-expert as ``fc1, fc2`` pairs, in sub-expert order."""
         scale = self.context.lora.scale
         for index in range(self.w1_B.shape[0]):
             fc1, fc2 = self._hosts[2 * index : 2 * index + 2]
             yield fc1.weight, lambda index=index: scale * torch.cat(
-                [self.w1_B[index].float() @ self.w1_A.float(), self.w3_B[index].float() @ self.w3_A.float()]
+                [
+                    read(self.w1_B)[index].float() @ read(self.w1_A).float(),
+                    read(self.w3_B)[index].float() @ read(self.w3_A).float(),
+                ]
             )
-            yield fc2.weight, lambda index=index: scale * (self.w2_B.float() @ self.w2_A[index].float())
+            yield fc2.weight, lambda index=index: scale * (read(self.w2_B).float() @ read(self.w2_A)[index].float())
 
     def export_plan(self, gather) -> list:
         prefix = self.hf_prefix

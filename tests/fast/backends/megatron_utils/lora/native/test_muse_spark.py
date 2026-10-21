@@ -14,7 +14,7 @@ import torch.nn as nn
 from miles.backends.megatron_utils.lora.native.config import LoRAConfig
 from miles.backends.megatron_utils.lora.native.hf_adapter import export_lora_hf_named
 from miles.backends.megatron_utils.lora.native.lora import _attach_layer
-from miles.backends.megatron_utils.lora.native.merge import merge_lora_into_weights
+from miles.backends.megatron_utils.lora.native.merge import merge_lora_into_named_weights, merge_lora_into_weights
 from miles.backends.megatron_utils.lora.native.modules.moe import _grouped_linear
 from miles.backends.megatron_utils.lora.native.registry import MODEL_SPECS, resolve_config_spec
 from miles.backends.megatron_utils.lora.native.spec.attention import build_muse_spark_qgkv_permutation
@@ -214,3 +214,50 @@ def test_adapter_export_names_follow_the_checkpoint():
         for ab in "AB"
     } | {f"{prefix}mlp.experts.{leaf}.lora_{ab}.weight" for leaf in ("w1", "w3", "w2") for ab in "AB"}
     assert names == expected
+
+
+EXPERT_OFFSET = 6  # this rank holds global experts 6, 7, 8
+
+
+def _global_name(local_name: str) -> str:
+    """The raw-mode global name of a layer-3 tensor on an EP rank whose first expert is EXPERT_OFFSET."""
+    stem, _, index = local_name.rpartition(".weight")
+    if ".experts.linear_fc" in local_name and index.isdigit():
+        local_name = f"{stem}.weight{int(index) + EXPERT_OFFSET}"
+    return f"module.module.decoder.layers.3.{local_name}"
+
+
+@pytest.mark.parametrize("output_gate", [True, False], ids=["output-gate", "no-gate"])
+def test_sync_merge_reads_a_host_copy_by_global_name(output_gate):
+    """The sync's merged view: weights (adapters included) are host copies under global names, the experts'
+    names carry the rank's expert offset; it matches the live merge and the adapted forward bit for bit."""
+    layer = _adapted_layer(output_gate)
+    live = dict(merge_lora_into_weights([layer], _base_weights(layer)).items())
+    names = {id(tensor): _global_name(name) for name, tensor in layer.named_parameters()}
+    backups = {_global_name(name): tensor.detach().clone() for name, tensor in layer.named_parameters()}
+    with torch.no_grad():  # the live adapters no longer hold the synced values: the merge must read the copies
+        for name, tensor in layer.named_parameters():
+            if "lora" in name:
+                tensor.zero_()
+    # an offloaded trainer's module buffers are paused: the merge must not read the live permutation
+    qkv = layer.self_attention.lora_qkv_adapter
+    qkv.out_perm = torch.empty_like(qkv.out_perm, device="meta")
+    merged = merge_lora_into_named_weights([layer], backups, names)
+
+    for name, _ in layer.named_parameters():
+        if "lora" in name:
+            continue
+        assert torch.equal(merged[_global_name(name)], live[name]), name
+    attention = backups["module.module.decoder.layers.3.self_attention.linear_qkv.weight"]
+    assert merged["module.module.decoder.layers.3.self_attention.linear_qkv.weight"] is not attention
+    norm = "module.module.decoder.layers.3.mlp.fc1_latent_proj.weight"
+    assert merged[norm] is backups[norm]
+
+
+def test_sync_merge_refuses_an_adapter_whose_host_is_not_synced():
+    layer = _adapted_layer(True)
+    names = {id(tensor): _global_name(name) for name, tensor in layer.named_parameters()}
+    backups = {_global_name(name): tensor.detach().clone() for name, tensor in layer.named_parameters()}
+    del backups[_global_name("self_attention.linear_proj.weight")]
+    with pytest.raises(AssertionError, match="not exported"):
+        merge_lora_into_named_weights([layer], backups, names)

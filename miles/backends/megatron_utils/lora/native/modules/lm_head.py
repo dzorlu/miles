@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from miles.backends.megatron_utils.lora.native.distributed import branch_input
-from miles.backends.megatron_utils.lora.native.modules.linear import NativeLoRAAdapter, new_lora_parameter
+from miles.backends.megatron_utils.lora.native.modules.linear import NativeLoRAAdapter, live_tensor, new_lora_parameter
 from miles.backends.megatron_utils.lora.native.spec.base import AttachContext
 
 
@@ -44,10 +44,10 @@ class LoRAOutputHead(NativeLoRAAdapter):
         scaled = branch_input(scaled, base_module, self.context)
         return F.linear(F.linear(scaled, self.head_A), self.head_B)
 
-    def weight_deltas(self):
+    def weight_deltas(self, read=live_tensor):
         """The host divides its input by muP too, so the merged head carries the full delta."""
         (host,) = self._hosts
-        yield host.weight, lambda: self.context.lora.scale * (self.head_B.float() @ self.head_A.float())
+        yield host.weight, lambda: self.context.lora.scale * (read(self.head_B).float() @ read(self.head_A).float())
 
     def export_plan(self, gather) -> list:
         head_b = gather.request(self.head_B, 0)
