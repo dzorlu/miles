@@ -15,6 +15,7 @@ class MergedWeights(Mapping[str, torch.Tensor]):
 
     Deltas are computed on access in the host's local layout, so the base-weight
     converters gather and rename merged tensors exactly as they would the base.
+    A merged tensor is on its delta's device (the adapter's), whatever device the weight is on.
     """
 
     def __init__(self, weights: Mapping[str, torch.Tensor], deltas: dict[int, Callable[[], torch.Tensor]]):
@@ -27,7 +28,10 @@ class MergedWeights(Mapping[str, torch.Tensor]):
         delta = self._deltas.get(id(weight))
         if delta is None:
             return weight
-        return (weight.float() + delta()).to(weight.dtype)
+        update = delta()
+        # Move first, widen on the delta's device: a host weight (e.g. a pinned memory-saver backup) widened
+        # with .float() or a combined .to(cuda, float32) converts on the CPU. bf16 -> fp32 is exact either way.
+        return (weight.to(update.device).float() + update).to(weight.dtype)
 
     def __iter__(self) -> Iterator[str]:
         return iter(self._weights)
