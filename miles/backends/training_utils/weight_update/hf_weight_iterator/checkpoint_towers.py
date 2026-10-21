@@ -47,37 +47,51 @@ def is_tower_key(name: str, towers: tuple[str, ...] = _TOWERS) -> bool:
     return any(part in towers for part in name.split(".")[:-1])
 
 
-def _tower_keys_by_shard(hf_checkpoint: str, towers: tuple[str, ...] = _TOWERS) -> dict[str, list[str]]:
+def _tower_keys_by_shard(
+    hf_checkpoint: str, towers: tuple[str, ...] = _TOWERS, prefixes: tuple[str, ...] | None = None
+) -> dict[str, list[str]]:
+    def selected(key: str) -> bool:
+        return key.startswith(prefixes) if prefixes is not None else is_tower_key(key, towers)
+
     index_path = os.path.join(hf_checkpoint, "model.safetensors.index.json")
     by_shard: dict[str, list[str]] = {}
     if os.path.isfile(index_path):
         with open(index_path) as f:
             for key, shard in json.load(f)["weight_map"].items():
-                if is_tower_key(key, towers):
+                if selected(key):
                     by_shard.setdefault(shard, []).append(key)
         return by_shard
     for path in sorted(glob.glob(os.path.join(hf_checkpoint, "*.safetensors"))):
         with safe_open(path, framework="pt", device="cpu") as f:
-            keys = [k for k in f.keys() if is_tower_key(k, towers)]
+            keys = [k for k in f.keys() if selected(k)]
         if keys:
             by_shard[os.path.basename(path)] = keys
     return by_shard
 
 
 @functools.cache
-def _load_towers(hf_checkpoint: str, towers: tuple[str, ...] = _TOWERS) -> tuple[tuple[str, torch.Tensor], ...]:
+def _load_towers(
+    hf_checkpoint: str, towers: tuple[str, ...] = _TOWERS, prefixes: tuple[str, ...] | None = None
+) -> tuple[tuple[str, torch.Tensor], ...]:
     loaded = []
-    for shard, keys in sorted(_tower_keys_by_shard(hf_checkpoint, towers).items()):
+    for shard, keys in sorted(_tower_keys_by_shard(hf_checkpoint, towers, prefixes).items()):
         with safe_open(os.path.join(hf_checkpoint, shard), framework="pt", device="cpu") as f:
             loaded.extend((key, f.get_tensor(key)) for key in sorted(keys))
     return tuple(loaded)
 
 
-def iter_checkpoint_tower_units(hf_checkpoint: str, *, materialize: bool, towers: tuple[str, ...] = _TOWERS):
+def iter_checkpoint_tower_units(
+    hf_checkpoint: str,
+    *,
+    materialize: bool,
+    towers: tuple[str, ...] = _TOWERS,
+    prefixes: tuple[str, ...] | None = None,
+):
     """The frozen tower weights of ``hf_checkpoint`` as weight-update units,
     one tensor each. ``towers`` are the module names matched against the
-    checkpoint keys as path parts (``--mm-tower-sync``)."""
+    checkpoint keys as path parts (``--mm-tower-sync``); ``prefixes``, when
+    set, select keys by prefix instead (Muse Spark's non-text tensors)."""
     if not materialize:
         return
-    for name, tensor in _load_towers(hf_checkpoint, tuple(towers)):
+    for name, tensor in _load_towers(hf_checkpoint, tuple(towers), prefixes):
         yield [(name, tensor.to(current_platform.current_device()))]
