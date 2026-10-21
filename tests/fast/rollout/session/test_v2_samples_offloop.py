@@ -43,7 +43,16 @@ def _core(tokenizer, **config_overrides):
     registry = SessionRegistryV2(tokenizer, tito_tokenizer=tito, processor=FakeProcessor())
     core = SessionCoreV2(engine, registry, config, config.instance_id)
     session_id = registry.create_session()
-    _chat(core, session_id, [{"role": "user", "content": [{"type": "text", "text": "look"}, {"type": "image_url", "image_url": {"url": url}}]}])
+    _chat(
+        core,
+        session_id,
+        [
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "look"}, {"type": "image_url", "image_url": {"url": url}}],
+            }
+        ],
+    )
     return core, session_id
 
 
@@ -86,6 +95,51 @@ def test_the_samples_op_runs_off_the_event_loop(tokenizer, monkeypatch):
     response = asyncio.run(run())
     assert response.status_code == 200
     assert len(ticks) == 40, "the ticker never ran: the loop was blocked"
+
+
+def test_at_most_four_builds_run_at_once(tokenizer, monkeypatch):
+    """Eight sessions collected together build in at most SAMPLES_BUILD_SLOTS threads at a time."""
+    import threading
+    import time
+
+    real = core_module.build_leaf_material
+    state = {"running": 0, "peak": 0, "lock": threading.Lock()}
+
+    def counted_build(*args, **kwargs):
+        with state["lock"]:
+            state["running"] += 1
+            state["peak"] = max(state["peak"], state["running"])
+        try:
+            time.sleep(0.15)
+            return real(*args, **kwargs)
+        finally:
+            with state["lock"]:
+                state["running"] -= 1
+
+    monkeypatch.setattr(core_module, "build_leaf_material", counted_build)
+    core, first = _core(tokenizer)
+    url = _data_url(_png())
+    sessions = [first]
+    for _ in range(7):
+        session_id = core.registry.create_session()
+        _chat(
+            core,
+            session_id,
+            [
+                {
+                    "role": "user",
+                    "content": [{"type": "text", "text": "look"}, {"type": "image_url", "image_url": {"url": url}}],
+                }
+            ],
+        )
+        sessions.append(session_id)
+
+    async def run():
+        return await asyncio.gather(*(core.collect_samples(s, max_seq_len=None) for s in sessions))
+
+    responses = asyncio.run(run())
+    assert [r.status_code for r in responses] == [200] * 8
+    assert 1 < state["peak"] <= core_module.SAMPLES_BUILD_SLOTS == 4
 
 
 def test_the_samples_op_holds_the_session_lock_while_it_builds(tokenizer, monkeypatch):
@@ -178,7 +232,9 @@ def test_a_cancelled_collection_keeps_the_lock_until_the_worker_ends(tokenizer, 
 
     asyncio.run(run())
     returned_at, locked = phase["lock_at_cancel_return"]
-    assert phase["build_done"] is not None and returned_at >= phase["build_done"], "cancellation returned only after the build ended"
+    assert (
+        phase["build_done"] is not None and returned_at >= phase["build_done"]
+    ), "cancellation returned only after the build ended"
     assert locked is False, "and released the lock afterwards"
 
 

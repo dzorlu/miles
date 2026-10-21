@@ -36,6 +36,12 @@ from miles.utils.function_registry import load_function
 logger = logging.getLogger(__name__)
 
 
+#: Samples builds running in worker threads at the same time, per server. Each
+#: holds one session's samples (tokens, images, routed-expert rows) until it
+#: returns; more at once trades memory for nothing, the builds are CPU-bound.
+SAMPLES_BUILD_SLOTS = 4
+
+
 class SessionCoreV2(SessionCore):
     """``SessionCore`` with tree serving: overrides the session-semantics
     methods (positioning/commit, metadata, samples op), inherits the
@@ -48,6 +54,7 @@ class SessionCoreV2(SessionCore):
         # Import-path only in production: function_registry is process-local.
         self.sample_picker = load_function(config.session_sample_picker_path, sync_required=True)
         self.sample_postprocessor = load_function(config.session_sample_postprocessor_path, sync_required=True)
+        self._build_slots = asyncio.Semaphore(SAMPLES_BUILD_SLOTS)
 
     def mismatch_sampled(self, session_id: str) -> bool:
         """Whether this session's samples op computes tito_session_mismatch:
@@ -107,12 +114,17 @@ class SessionCoreV2(SessionCore):
         lock keeps chat commits of this session out while the tree is read,
         and the event loop keeps serving every other session. On the loop it
         froze a whole server instance for 160 to 190 s per 320-turn session
-        (13 sessions, 2026-10-13). Deterministic assembly/hook failures map
-        to 422; unknown exceptions propagate.
+        (13 sessions, 2026-10-13). At most ``SAMPLES_BUILD_SLOTS`` builds run
+        at once: every build holds its session's samples and R3 rows in
+        memory, and 32 sessions ending together (the CPU benchmark,
+        tests/fast/rollout/test_agentic_rollout_benchmark.py) peaked at
+        12.1 GB of tree RSS unbounded against 10.8 GB one at a time.
+        Deterministic assembly/hook failures map to 422; unknown exceptions
+        propagate.
         """
         session = self.registry.get_session(session_id)
         started = time.perf_counter()
-        async with session.lock:
+        async with self._build_slots, session.lock:
             worker = asyncio.ensure_future(
                 asyncio.to_thread(self._collect_samples_sync, session_id, session, max_seq_len, agent_metadata)
             )
