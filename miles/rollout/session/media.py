@@ -244,6 +244,24 @@ def expand_image_placeholders(token_ids: list[int], counts: list[int], pad_id: i
     return out
 
 
+def expanded_length(token_ids: list[int], messages: list[dict[str, Any]], media: "MediaStore | None") -> int:
+    """``len(token_ids)`` as the engine counts it: each image placeholder at
+    the image's token count (``expand_image_placeholders``), the images taken
+    in message order from ``messages``. A text-only server, a store that does
+    not expand, or ids without a placeholder count as they are. Raises when
+    the placeholders outnumber the images the messages carry."""
+    if media is None or not media.enabled or not media.expands:
+        return len(token_ids)
+    placeholders = sum(1 for t in token_ids if t == media.image_pad_id)
+    if not placeholders:
+        return len(token_ids)
+    refs = media_references(messages)
+    if len(refs) < placeholders:
+        raise ValueError(f"{placeholders} image placeholder(s) in the ids but {len(refs)} image(s) in the messages")
+    counts = [media.get(ref).num_tokens for ref in refs[:placeholders]]
+    return len(token_ids) - placeholders + sum(counts)
+
+
 def train_inputs(entries: list[MediaEntry]) -> dict[str, np.ndarray]:
     """The images of one sample in the trainer's PNG format."""
     pngs = [entry.png for entry in entries]
