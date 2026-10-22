@@ -23,7 +23,10 @@ def available_memory():
     ``get_memory_info`` and cover every process on the GPU; ``allocated``,
     ``reserved``, ``inactive_split`` (reserved bytes the allocator holds in
     fragments it cannot hand out) and ``segments`` are this process's caching
-    allocator; ``host`` is this process's host memory (``host_memory``)."""
+    allocator; ``max_allocated`` and ``max_reserved`` are its peaks since the
+    last ``reset_peak_memory_stats`` (the trainer resets them at every wake-up,
+    so the line before an offload carries that step's peak); ``host`` is this
+    process's host memory (``host_memory``)."""
     device = torch.accelerator.current_device_index()
     free, total = torch.accelerator.get_memory_info(device)
     stats = torch.accelerator.memory_stats(device)
@@ -34,6 +37,8 @@ def available_memory():
         "used_GB": _byte_to_gb(total - free),
         "allocated_GB": _byte_to_gb(torch.accelerator.memory_allocated(device)),
         "reserved_GB": _byte_to_gb(torch.accelerator.memory_reserved(device)),
+        "max_allocated_GB": _byte_to_gb(torch.accelerator.max_memory_allocated(device)),
+        "max_reserved_GB": _byte_to_gb(torch.accelerator.max_memory_reserved(device)),
         "inactive_split_GB": _byte_to_gb(stats.get("inactive_split_bytes.all.current", 0)),
         "segments": stats.get("segment.all.current", 0),
         "alloc_retries": stats.get("num_alloc_retries", 0),
