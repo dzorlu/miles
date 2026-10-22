@@ -453,6 +453,57 @@ class TestResolveArgsCheckpointLoad:
         assert (args.ckpt_step, args.start_rollout_id) == (None, None)
 
 
+def _write_native_lora_saves(tmp_path, iterations) -> str:
+    """A native LoRA run's --save: per-iteration adapter shards and no Megatron tracker."""
+    path = tmp_path / "lora_save"
+    for iteration in iterations:
+        adapter = path / f"iter_{iteration:07d}" / "adapter"
+        adapter.mkdir(parents=True)
+        (adapter / "adapter_megatron_rank0.pt").write_bytes(b"")
+    return str(path)
+
+
+class TestResolveArgsCheckpointLoadNativeLora:
+    def test_a_native_lora_resume_keeps_the_optimizer_and_takes_the_newest_adapter(self, tmp_path):
+        """The adapter save carries the optimizer state; forcing --no-load-optim would drop it."""
+        load = _write_native_lora_saves(tmp_path, [0, 1, 2])
+        args = _make_checkpoint_args(tmp_path, load=load, lora_rank=32, lora_adapter_path=None)
+
+        resolve_args_checkpoint_load(args)
+
+        assert args.load == str(tmp_path / "ref")
+        assert args.requested_load == load
+        assert args.lora_adapter_path == str(tmp_path / "lora_save" / "iter_0000002" / "adapter")
+        assert (args.no_load_optim, args.no_load_rng, args.finetune) == (False, True, True)
+
+    def test_an_explicit_adapter_path_wins(self, tmp_path):
+        load = _write_native_lora_saves(tmp_path, [0, 1])
+        chosen = str(tmp_path / "lora_save" / "iter_0000000" / "adapter")
+        args = _make_checkpoint_args(tmp_path, load=load, lora_rank=32, lora_adapter_path=chosen)
+
+        resolve_args_checkpoint_load(args)
+
+        assert args.lora_adapter_path == chosen
+        assert args.no_load_optim is False
+
+    def test_a_lora_run_without_saves_starts_fresh_as_before(self, tmp_path):
+        args = _make_checkpoint_args(tmp_path, lora_rank=32, lora_adapter_path=None)
+
+        resolve_args_checkpoint_load(args)
+
+        assert args.lora_adapter_path is None
+        assert (args.no_load_optim, args.no_load_rng, args.finetune) == (True, True, True)
+
+    def test_adapter_saves_do_not_affect_a_run_without_lora(self, tmp_path):
+        load = _write_native_lora_saves(tmp_path, [0])
+        args = _make_checkpoint_args(tmp_path, load=load, lora_rank=0, lora_adapter_path=None)
+
+        resolve_args_checkpoint_load(args)
+
+        assert args.lora_adapter_path is None
+        assert args.no_load_optim is True
+
+
 class TestHasMegatronCheckpoint:
     def test_a_directory_holding_the_tracker_file_is_a_checkpoint(self, tmp_path):
         """This is the one shape both branches treat as a resume."""

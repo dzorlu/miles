@@ -372,12 +372,16 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
 
     # async but never awaits, for the same reason as save
     async def load(self, rollout_id: int, completed_rollout_ids: dict[str, int] | None = None) -> None:
-        if self.args.load is None:
+        # The run directory the user asked to load. resolve_args_checkpoint_load points --load at the
+        # reference weights when it holds no Megatron checkpoint (e.g. a native LoRA run's adapter saves),
+        # but the rollout state still lives under the requested directory.
+        load_dir = getattr(self.args, "requested_load", None) or self.args.load
+        if load_dir is None:
             logger.warning("no --load: the rollout side starts fresh")
             return
         assert rollout_id >= 0, f"rollout {rollout_id} is not a trained step"
 
-        directory = compute_rollout_checkpoint_dir(self.args.load, rollout_id=rollout_id)
+        directory = compute_rollout_checkpoint_dir(load_dir, rollout_id=rollout_id)
         assert directory.is_dir(), (
             f"the trainer restored rollout {rollout_id}, but {directory} does not exist; a run saved before the "
             f"rollout-side state moved into one directory per rollout cannot resume that state"
