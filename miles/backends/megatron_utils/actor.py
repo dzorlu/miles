@@ -539,6 +539,8 @@ class MegatronTrainRayActor(TrainRayActor):
             torch_memory_saver.resume(tag=None)
 
         clear_memory()
+        # Peaks from here to the next offload are this step's; print_memory("before offload model") reports them.
+        torch.accelerator.reset_peak_memory_stats(torch.accelerator.current_device_index())
         reload_process_groups()
         self._asleep = False
         print_memory("after wake_up model")

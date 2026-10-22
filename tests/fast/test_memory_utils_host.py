@@ -35,6 +35,17 @@ def test_the_report_carries_the_host_part(monkeypatch):
     assert report["host"]["rss_GB"] > 0 and "anon_GB" in report["host"]
 
 
+def test_the_report_carries_peaks_since_the_last_reset():
+    if not torch.cuda.is_available():
+        pytest.skip("needs a CUDA device")
+    big = torch.empty(256 * 2**20, dtype=torch.uint8, device="cuda")
+    del big
+    assert memory_utils.available_memory()["max_allocated_GB"] >= 0.25
+    torch.accelerator.reset_peak_memory_stats(torch.accelerator.current_device_index())
+    report = memory_utils.available_memory()
+    assert report["max_allocated_GB"] == report["allocated_GB"]
+
+
 def test_trim_host_heap_is_a_no_op_off_linux(monkeypatch):
     monkeypatch.setattr(sys, "platform", "darwin")
     assert memory_utils.trim_host_heap() is False
