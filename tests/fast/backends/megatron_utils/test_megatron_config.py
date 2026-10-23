@@ -486,6 +486,16 @@ class TestResolveArgsCheckpointLoadNativeLora:
         assert args.lora_adapter_path == chosen
         assert args.no_load_optim is False
 
+    def test_a_native_lora_resume_leaves_the_start_rollout_to_the_restored_iteration(self, tmp_path):
+        """create_training_model starts at a set --start-rollout-id over the restored one; 0 here would
+        regenerate and retrain rollout 0 onward and overwrite the earlier saves."""
+        load = _write_native_lora_saves(tmp_path, [0, 1])
+        args = _make_checkpoint_args(tmp_path, load=load, lora_rank=32, lora_adapter_path=None)
+
+        resolve_args_checkpoint_load(args)
+
+        assert args.start_rollout_id is None
+
     def test_a_lora_run_without_saves_starts_fresh_as_before(self, tmp_path):
         args = _make_checkpoint_args(tmp_path, lora_rank=32, lora_adapter_path=None)
 
@@ -493,6 +503,7 @@ class TestResolveArgsCheckpointLoadNativeLora:
 
         assert args.lora_adapter_path is None
         assert (args.no_load_optim, args.no_load_rng, args.finetune) == (True, True, True)
+        assert args.start_rollout_id == 0
 
     def test_adapter_saves_do_not_affect_a_run_without_lora(self, tmp_path):
         load = _write_native_lora_saves(tmp_path, [0])

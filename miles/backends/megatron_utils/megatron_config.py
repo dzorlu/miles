@@ -386,9 +386,11 @@ def resolve_args_checkpoint_load(args: Namespace) -> None:
             # A native LoRA run saves only adapter shards under --load (iter_*/adapter, no Megatron tracker).
             # Resuming it loads the base weights from --ref-load and the adapter, optimizer and iteration
             # from that save (restore_lora_adapter); --load stays in args.requested_load for the rollout state.
+            # Its start_rollout_id is left as given: load_model_and_optimizer sets it from the restored iteration.
             lora_save = latest_native_lora_save(args.load) if getattr(args, "lora_rank", 0) > 0 else None
             if lora_save is None:
                 args.no_load_optim = True
+                args.start_rollout_id = 0
             elif getattr(args, "lora_adapter_path", None) is None:
                 args.lora_adapter_path = str(lora_save)
             args.no_load_rng = True
@@ -396,7 +398,6 @@ def resolve_args_checkpoint_load(args: Namespace) -> None:
             args.load = args.ref_load
             if args.ref_ckpt_step is not None:
                 args.ckpt_step = args.ref_ckpt_step
-            args.start_rollout_id = 0
 
 
 def latest_native_lora_save(load_dir: str | None) -> Path | None:
