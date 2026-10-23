@@ -1026,6 +1026,7 @@ def load_model_state(
         iteration = 0
         restored_trained_iteration = not args.finetune
 
+    scheduler_restored_from_adapter = False
     if is_lora_enabled(args) and role == "actor" and args.lora_adapter_path is not None:
         adapter_iteration = restore_lora_adapter(
             model, args, optimizer=optimizer, opt_param_scheduler=opt_param_scheduler
@@ -1033,15 +1034,21 @@ def load_model_state(
         if adapter_iteration is not None:
             iteration = adapter_iteration
             restored_trained_iteration = True
+            # the adapter's training state carries the scheduler position, which already counts these iterations
+            scheduler_restored_from_adapter = True
 
     check_peak_gpu_memory_after_load(args)
     clear_memory()
 
     check_model_hashes(args, model, iteration)
 
-    # Megatron checkpoint loads can restore scheduler state directly. In that
-    # case, stepping by the checkpoint iteration here would double-count.
-    if opt_param_scheduler is not None and not (args.use_checkpoint_opt_param_scheduler and iteration > 0):
+    # Megatron checkpoint loads and native LoRA adapter restores can restore scheduler state
+    # directly. In that case, stepping by the checkpoint iteration here would double-count.
+    if (
+        opt_param_scheduler is not None
+        and not scheduler_restored_from_adapter
+        and not (args.use_checkpoint_opt_param_scheduler and iteration > 0)
+    ):
         opt_param_scheduler.step(increment=iteration * args.global_batch_size)
 
     if not restored_trained_iteration:

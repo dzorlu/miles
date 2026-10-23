@@ -106,7 +106,7 @@ def _mock_megatron_environment():
             },
         )
         _stub_module("megatron.core.optimizer_param_scheduler", {"OptimizerParamScheduler": _DummyScheduler})
-        _stub_module("megatron.core.packed_seq_params", {"PackedSeqParams": MagicMock()})
+        _stub_module("megatron.core.packed_seq_params", {"PackedSeqParams": type("PackedSeqParams", (), {})})
         _stub_module("megatron.core.pipeline_parallel", {"get_forward_backward_func": MagicMock()})
         _stub_module("megatron.core.transformer", is_package=True)
         _stub_module("megatron.core.transformer.utils", {"sharded_state_dict_default": MagicMock()})
@@ -126,6 +126,7 @@ def _mock_megatron_environment():
         _stub_module(
             "megatron.training.checkpointing",
             {
+                "get_checkpoint_name": MagicMock(),
                 "load_checkpoint": MagicMock(),
                 "save_checkpoint": MagicMock(),
             },
@@ -229,6 +230,8 @@ def _load_model_state_with(
     restored_trained_iteration: bool | None = None,
     adapter_iteration: int | None = None,
     lora_adapter_path: str | None = None,
+    opt_param_scheduler: MagicMock | None = None,
+    use_checkpoint_opt_param_scheduler: bool = True,
 ) -> "LoadCheckpointOutput":
     from miles.backends.megatron_utils.model import load_model_state
 
@@ -251,7 +254,7 @@ def _load_model_state_with(
         _patch_initialize_side_effects(stack)
         return load_model_state(
             Namespace(
-                use_checkpoint_opt_param_scheduler=True,
+                use_checkpoint_opt_param_scheduler=use_checkpoint_opt_param_scheduler,
                 global_batch_size=8,
                 finetune=finetune,
                 lora_rank=0 if lora_adapter_path is None else 8,
@@ -261,7 +264,7 @@ def _load_model_state_with(
             ),
             model=[_FakeModelChunk()],
             optimizer=None,
-            opt_param_scheduler=None,
+            opt_param_scheduler=opt_param_scheduler,
             role="actor",
             checkpointing_context=None,
         )
@@ -313,3 +316,37 @@ class TestALoraAdapterThatCarriesItsOwnIteration:
     def test_adapter_weights_without_training_state_start_at_rollout_zero(self, tmp_path: Path) -> None:
         """An HF adapter or shards saved without training state carry no iteration to continue from."""
         assert self._start(tmp_path, adapter_iteration=None).start_rollout_id == 0
+
+    @pytest.mark.parametrize("use_checkpoint_opt_param_scheduler", [True, False])
+    def test_a_resume_does_not_step_the_scheduler_the_adapter_restored(
+        self, tmp_path: Path, use_checkpoint_opt_param_scheduler: bool
+    ) -> None:
+        """The adapter's training state holds the scheduler position after its iteration; stepping it by that
+        iteration again puts the learning-rate schedule a rollout ahead of the run that never stopped."""
+        scheduler = MagicMock()
+        _load_model_state_with(
+            tmp_path=tmp_path,
+            finetune=True,
+            iteration=0,
+            adapter_iteration=1,
+            lora_adapter_path=str(tmp_path / "adapter"),
+            opt_param_scheduler=scheduler,
+            use_checkpoint_opt_param_scheduler=use_checkpoint_opt_param_scheduler,
+        )
+
+        scheduler.step.assert_not_called()
+
+    def test_adapter_weights_without_training_state_still_step_the_scheduler(self, tmp_path: Path) -> None:
+        """With nothing restored, the base load's own iteration still advances the scheduler."""
+        scheduler = MagicMock()
+        _load_model_state_with(
+            tmp_path=tmp_path,
+            finetune=True,
+            iteration=0,
+            adapter_iteration=None,
+            lora_adapter_path=str(tmp_path / "adapter"),
+            opt_param_scheduler=scheduler,
+            use_checkpoint_opt_param_scheduler=False,
+        )
+
+        scheduler.step.assert_called_once_with(increment=0)
