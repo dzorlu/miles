@@ -106,6 +106,7 @@ class LinearTrajectory:
             trajectory_token_ids=list(self.trajectory_token_ids),
             generated_checkpoint_message_ends=list(self.generated_checkpoint_message_ends),
             turn_args_history=list(self.turn_args_history),
+            media=self.media.snapshot() if self.media is not None else None,
         )
 
     @property

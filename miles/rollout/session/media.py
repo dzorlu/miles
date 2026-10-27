@@ -113,6 +113,14 @@ class MediaStore:
             and self.entries == other.entries
         )
 
+    def snapshot(self) -> MediaStore:
+        """A store with the images registered so far. Entries are frozen and shared;
+        only the index is copied, so an image registered later is not in the copy.
+        Caller holds the session lock."""
+        copy = MediaStore(self.processor, self.image_pad_id, expands=self.expands, family=self.family)
+        copy.entries = dict(self.entries)
+        return copy
+
     def register(self, url: str) -> str:
         """Store the image behind a data URL; return its ``mm://`` reference."""
         if url.startswith(MEDIA_URL_PREFIX):

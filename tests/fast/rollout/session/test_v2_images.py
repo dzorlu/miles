@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 import uuid
 
 import pytest
@@ -193,6 +194,82 @@ def test_images_flow_through_the_v2_session_server(tokenizer):
     assert sample.loss_mask.count(1) == 2 * reply_len, "only the two sampled replies are trained"
 
 
+async def test_the_samples_worker_builds_from_the_images_of_its_snapshot(tokenizer, monkeypatch):
+    """The samples op snapshots the session under its lock and builds in a
+    worker thread. A chat that lands during the build registers a new image
+    in the live store; the build must still see exactly the snapshot's
+    images and return the same samples as a build with no chat in between."""
+    tito = get_tito_tokenizer(tokenizer, tokenizer_type="qwen38small")
+    pad_id = tito.image_pad_id()
+    first_url, second_url = _data_url(_png()), _data_url(_png(width=128, color=(5, 5, 5)))
+    engine = ExactTokenEngine(tokenizer, pad_id, {first_url: 4, second_url: 8}, reply="ok")
+    config = make_session_server_config(
+        use_session_server="v2",
+        hf_checkpoint=MODEL,
+        tito_model="qwen38small",
+        instance_id=uuid.uuid4().hex,
+        session_sample_picker_path="miles.rollout.session.v2.picker_hub.drop_rolled_back_leaves",
+        session_sample_postprocessor_path="miles.rollout.session.v2.postprocessor_hub.default_postprocess",
+    )
+    registry = SessionRegistryV2(tokenizer, tito_tokenizer=tito, processor=FakeProcessor())
+    core = SessionCoreV2(engine, registry, config, config.instance_id)
+    session_id = registry.create_session()
+    turn1 = [
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "look"}, {"type": "image_url", "image_url": {"url": first_url}}],
+        }
+    ]
+
+    async def chat(messages):
+        body = json.dumps({"model": "default", "messages": messages, "max_tokens": 8}).encode()
+        return await core.chat_completions(session_id, method="POST", query="", headers={}, body=body)
+
+    first = await chat(turn1)
+    assert first.status_code == 200, first.body
+    expected = await core.collect_samples(session_id, max_seq_len=None)
+    assert expected.status_code == 200, expected.body
+
+    started = asyncio.Event()
+    release = threading.Event()
+    loop = asyncio.get_running_loop()
+    collect = core._collect_samples
+    seen = []
+
+    def blocked(sid, snapshot, **kwargs):
+        seen.append(snapshot)
+        loop.call_soon_threadsafe(started.set)
+        assert release.wait(timeout=5)
+        return collect(sid, snapshot, **kwargs)
+
+    monkeypatch.setattr(core, "_collect_samples", blocked)
+    task = asyncio.create_task(core.collect_samples(session_id, max_seq_len=None))
+    try:
+        await asyncio.wait_for(started.wait(), timeout=5)
+        assistant = json.loads(first.body)["choices"][0]["message"]
+        turn2 = turn1 + [
+            assistant,
+            {
+                "role": "user",
+                "content": [{"type": "text", "text": "next"}, {"type": "image_url", "image_url": {"url": second_url}}],
+            },
+        ]
+        assert (await chat(turn2)).status_code == 200
+    finally:
+        release.set()
+        response = await task
+    await core.close()
+
+    (snapshot,) = seen
+    live = registry.get_session(session_id).media
+    assert len(live.entries) == 2 and len(snapshot.media.entries) == 1
+    assert snapshot.media is not live
+    assert response.status_code == 200, response.body
+    assert response.body == expected.body
+    (sample,) = decode_samples_and_merge_input_sample(response.body, Sample(), fields=COMPUTED_FIELDS_V2).samples
+    assert sample.multimodal_train_inputs["image_grid_thw"].tolist() == [[1, 4, 4]]
+
+
 def test_an_engine_that_retokenizes_is_refused_at_sample_time(tokenizer):
     tito = get_tito_tokenizer(tokenizer, tokenizer_type="qwen38small")
     url = _data_url(_png())
@@ -347,7 +424,10 @@ def test_a_family_without_a_table_entry_refuses_images_and_names_the_table(token
 
     url = _data_url(_png())
     messages = [
-        {"role": "user", "content": [{"type": "text", "text": "look"}, {"type": "image_url", "image_url": {"url": url}}]}
+        {
+            "role": "user",
+            "content": [{"type": "text", "text": "look"}, {"type": "image_url", "image_url": {"url": url}}],
+        }
     ]
     with pytest.raises(MessageValidationError, match="image-token table") as info:
         _chat(core, session_id, messages)

@@ -58,8 +58,12 @@ class SessionStateV2:
     media: MediaStore | None = field(default=None, repr=False, compare=False)
 
     def snapshot(self) -> "SessionStateV2":
-        """Capture the committed tree for collection. Caller holds the lock."""
-        return replace(self, tree=self.tree.snapshot())
+        """Capture the committed tree and its images for collection. Caller holds the lock."""
+        return replace(
+            self,
+            tree=self.tree.snapshot(),
+            media=self.media.snapshot() if self.media is not None else None,
+        )
 
     def latest(self) -> TrajectoryNode | None:
         """The most recently committed generation (always a leaf), or ``None``

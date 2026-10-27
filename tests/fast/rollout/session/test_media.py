@@ -71,6 +71,20 @@ def test_the_store_keeps_one_entry_per_distinct_image_with_the_processor_count()
     assert len(store.entries) == 2
 
 
+def test_a_snapshot_keeps_the_images_registered_before_it():
+    """The samples worker reads a snapshot; an image a later chat registers
+    must not appear in it, and the snapshot shares the stored entries."""
+    store = MediaStore(FakeProcessor(), PAD)
+    first = store.register(_data_url(_png()))
+    copy = store.snapshot()
+    second = store.register(_data_url(_png(width=128)))
+    assert list(copy.entries) == [first[len(MEDIA_URL_PREFIX) :]]
+    assert len(store.entries) == 2
+    assert copy.get(first) is store.get(first)
+    with pytest.raises(KeyError):
+        copy.get(second)
+
+
 def test_a_jpeg_is_stored_as_png_and_the_engine_still_gets_the_client_bytes():
     store = MediaStore(FakeProcessor(), PAD)
     buffer = io.BytesIO()
