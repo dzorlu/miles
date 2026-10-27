@@ -128,7 +128,7 @@ class MediaStore:
                 raise ValueError(f"unknown media reference {url}")
             return url
         if not self.enabled:
-            if self.processor is None:
+            if self.image_pad_id is not None:
                 raise ValueError("this session server cannot carry images: the model has no image processor")
             raise ValueError(
                 f"this session server cannot carry images: TITO family {self.family or 'default'} has no "
