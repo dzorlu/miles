@@ -82,18 +82,14 @@ def setup_session_routes(app, backend, config: SessionServerConfig, *, use_addit
         if config.output_store_backend_config is None
         else connect_output_store(config.output_store_backend_config)
     )
-    # The image processor of a vision model (None for a text model): the
-    # sessions count and grid their images with it (miles.rollout.session.media).
-    processor = load_processor(config.hf_checkpoint, trust_remote_code=True)
+    # The sessions count and grid their images with the model's image processor
+    # (miles.rollout.session.media). Only a family in the image-token table can
+    # carry images, so only then is the processor loaded: AutoProcessor costs
+    # about 2 s per session server even for a text model, where it returns None.
     image_token_ids = tito_tokenizer.image_token_ids()  # raises when the family names a token this tokenizer lacks
-    if processor is not None and image_token_ids is None:
-        logger.warning(
-            "[session] %s has an image processor but TITO family %r has no entry in the image-token table "
-            "(ImageTokens, miles.utils.chat_template_utils.tito_tokenizer); requests with images are refused",
-            config.hf_checkpoint,
-            config.tito_model,
-        )
-    elif image_token_ids is not None:
+    processor = None
+    if image_token_ids is not None:
+        processor = load_processor(config.hf_checkpoint, trust_remote_code=True)
         logger.info("[session] TITO family %r image tokens: %s", config.tito_model, image_token_ids)
 
     use_v2 = config.use_session_server == "v2"
