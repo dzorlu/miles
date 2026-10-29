@@ -18,7 +18,9 @@ def _bare_actor(monkeypatch, **args):
     actor.model_parts = []
     actor.optimizers = []
     actor._heartbeat = SimpleNamespace(bump=lambda: None)
-    actor._fwd_tflops = 0
+    actor.output_store_read = None
+    monkeypatch.setattr(TorchNativeTrainRayActor, "_fwd_tflops", property(lambda self: 0))
+    monkeypatch.setattr(TorchNativeTrainRayActor, "_train_tflops", property(lambda self: 0))
     monkeypatch.setattr(TorchNativeTrainRayActor, "train_parallel_config", property(lambda self: None))
     monkeypatch.setattr(actor_module, "print_memory", lambda *a, **k: None)
     monkeypatch.setattr(actor_module.dist, "barrier", lambda group=None: None)
@@ -52,7 +54,7 @@ def test_a_train_step_releases_the_host_memory_after_training(monkeypatch):
     monkeypatch.setattr(
         actor_module,
         "get_rollout_data",
-        lambda args, rollout_data_ref, witness_info=None, train_parallel_config=None: ({"tokens": []}, nullcontext()),
+        lambda **kwargs: ({"tokens": []}, nullcontext()),
     )
     monkeypatch.setattr(actor_module, "release_host_memory", lambda: order.append("release"))
     monkeypatch.setattr(actor_module.perf, "log_perf_data_raw", lambda **k: order.append("perf"))
