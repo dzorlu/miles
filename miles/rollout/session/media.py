@@ -252,7 +252,7 @@ def expand_image_placeholders(token_ids: list[int], counts: list[int], pad_id: i
     return out
 
 
-def expanded_length(token_ids: list[int], messages: list[dict[str, Any]], media: "MediaStore | None") -> int:
+def expanded_length(token_ids: list[int], messages: list[dict[str, Any]], media: MediaStore | None) -> int:
     """``len(token_ids)`` as the engine counts it: each image placeholder at
     the image's token count (``expand_image_placeholders``), the images taken
     in message order from ``messages``. A text-only server, a store that does

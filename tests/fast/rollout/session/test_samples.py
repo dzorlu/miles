@@ -872,7 +872,6 @@ class TestAdditionR3Assembly:
         np.testing.assert_array_equal(merged.rollout_routed_experts, full)
         merged.validate()
 
-
     def test_two_patches_reconstruct_full_reference(self):
         """Patches must rebuild byte-for-byte the tensor full-R3 responses give
         for the same tokens under the same in-place lifecycle."""
