@@ -79,9 +79,10 @@ class TestComputeRequestPayloadOutputStore:
         with pytest.raises(StorePlanError, match="multimodal"):
             compute_request_payload(
                 self.make_args(use_rollout_routing_replay=True),
-                input_ids=[1, 2],
+                input_ids=[1, PAD, 2],
                 sampling_params={},
                 multimodal_inputs={"images": [object()]},
+                image_pad_id=PAD,
             )
 
 
