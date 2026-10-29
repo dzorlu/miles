@@ -21,7 +21,7 @@ class Glm5NextImageEncoder:
     def image_processor(self):
         """Loaded on the first PNG microbatch; runs that ship pixel tensors never need it."""
         processor = load_processor(self._hf_checkpoint, trust_remote_code=True)
-        if processor is None or getattr(processor, "image_processor", None) is None:
+        if processor is None or getattr(processor, "image_processor", None) is None:  # config-access-exempt: text processors have none
             raise RuntimeError(f"{self._hf_checkpoint} has no image processor to rebuild PNG images with")
         return processor.image_processor
 

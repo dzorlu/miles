@@ -26,7 +26,7 @@ class TitanTrainer(Trainer):
         super().__init__(config)
         dtype = TORCH_DTYPE_MAP[config.training.mixed_precision_param]
         for part in self.model_parts:
-            if hasattr(part, "attach_vision_tower"):
+            if hasattr(part, "attach_vision_tower"):  # config-access-exempt: only vision model parts define it
                 part.attach_vision_tower(config.hf_assets_path, device=self.device, dtype=dtype)
 
     @functools.cached_property
