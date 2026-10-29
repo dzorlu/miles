@@ -421,7 +421,7 @@ class SessionCore:
                 ]
             else:
                 samples = [merge_samples(samples, tokenizer)]
-            adopt_session_records(samples[0], session.records)
+            adopt_session_records(samples[0], session.records, media=session.media)
         except StorePlanError as exc:
             # Not a 422: the rollout raises it again and stops, as it does for one from /generate.
             raise OutputStoreContractError(str(exc)) from exc

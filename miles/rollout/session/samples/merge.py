@@ -255,13 +255,16 @@ def _compute_sample_from_openai_record(
     return sample
 
 
-def adopt_session_records(merged: Sample, records: list[SessionRecord]) -> None:
+def adopt_session_records(merged: Sample, records: list[SessionRecord], *, media: MediaStore | None = None) -> None:
     """Complete a merged sample's output store plan from its session's records.
 
     The per-turn plans leave routed experts out: a TITO trim of a turn would cut a row that the
     next turn's incremental object starts after. Like ``merge_samples_with_addition_r3``, they are
     rebuilt from the untrimmed records, each continuing from its ``routed_experts_start_len``. The
     sample also owns every record's object, so objects of turns the merge dropped are deleted with it.
+
+    A record's rows are counted in the engine's token space: ``media`` expands each image
+    placeholder of its prompt to the image's token count, as the engine did when it stored them.
     """
     plan = merged.rollout_store_plan
     if plan is None:
@@ -276,10 +279,11 @@ def adopt_session_records(merged: Sample, records: list[SessionRecord]) -> None:
                 # The merge stopped early: later records lie past the merged tokens.
                 break
             num_output = len(choice["meta_info"]["output_token_logprobs"])
+            prompt_len = expanded_length(record.request["input_ids"], record.request.get("messages") or [], media)
             turn = StorePlan.from_response(
                 ref,
                 request=record.request,
-                num_tokens=len(record.request["input_ids"]) + num_output,
+                num_tokens=prompt_len + num_output,
                 response_length=num_output,
             )
             rows = rows.append(turn.fields[RoutedExpertsSegments.name])
