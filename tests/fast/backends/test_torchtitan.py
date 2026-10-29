@@ -41,6 +41,8 @@ def _args(**overrides) -> Namespace:
         lora_A_init_method="kaiming",
         lora_dropout=0.0,
         lora_adapter_path=None,
+        use_sampling_support_replay=False,
+        loss_type="policy_loss",
         lora_train_only=False,
         colocate_memory_peak_device="cpu",
     )

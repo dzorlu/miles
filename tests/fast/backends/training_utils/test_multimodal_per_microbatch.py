@@ -42,9 +42,11 @@ def test_get_rollout_data_leaves_multimodal_inputs_on_the_host(monkeypatch, sing
     rollout = _rollout()
     host_inputs = rollout["multimodal_train_inputs"]
     monkeypatch.setattr(data_utils, "process_rollout_data", lambda *args, **kwargs: (rollout, None))
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: torch.device("cpu"))
+    monkeypatch.setattr(data_utils.current_platform, "current_device", lambda: torch.device("cpu"))
 
-    data, _ = data_utils.get_rollout_data(Namespace(enable_witness=False, qkv_format="thd"), rollout_data_ref=None)
+    data, _ = data_utils.get_rollout_data(
+        Namespace(enable_witness=False, qkv_format="thd"), rollout_data_ref=None, train_parallel_config=None
+    )
 
     assert data["multimodal_train_inputs"] is host_inputs
     assert data["multimodal_train_inputs"][0]["pixel_values"] is host_inputs[0]["pixel_values"]
@@ -52,8 +54,17 @@ def test_get_rollout_data_leaves_multimodal_inputs_on_the_host(monkeypatch, sing
 
 @pytest.mark.parametrize("multimodal_on_host", [False, True])
 def test_get_batch_moves_only_its_micro_batch(monkeypatch, single_rank, multimodal_on_host):
-    # "meta" stands in for the GPU: a tensor that reached it shows the move without CUDA
-    monkeypatch.setattr(torch.cuda, "current_device", lambda: torch.device("meta"))
+    monkeypatch.setattr(data_utils.current_platform, "current_device", lambda: torch.device("cpu"))
+    # record the pixel tensors handed to the device move; the move itself stays on the CPU
+    moved_shapes: list[tuple[int, ...]] = []
+    real_to = torch.Tensor.to
+
+    def recording_to(self, *args, **kwargs):
+        if "device" in kwargs and self.dim() == 2 and self.size(-1) == 4:
+            moved_shapes.append(tuple(self.shape))
+        return real_to(self, *args, **kwargs)
+
+    monkeypatch.setattr(torch.Tensor, "to", recording_to)
     rollout = _rollout()
     iterator = data_utils.DataIterator(rollout, micro_batch_indices=[[0, 1], [2]])
     keys = ["tokens", "loss_masks", "multimodal_train_inputs", "total_lengths", "response_lengths"]
@@ -61,12 +72,10 @@ def test_get_batch_moves_only_its_micro_batch(monkeypatch, single_rank, multimod
     first = data_utils.get_batch(iterator, keys, pad_multiplier=1, multimodal_on_host=multimodal_on_host)
     second = data_utils.get_batch(iterator, keys, pad_multiplier=1, multimodal_on_host=multimodal_on_host)
 
-    expected_device = torch.device("cpu") if multimodal_on_host else torch.device("meta")
+    # each micro-batch moves only its own screenshots: 4 patches, then 6; nothing when the model moves them
+    assert moved_shapes == ([] if multimodal_on_host else [(4, 4), (6, 4)])
     for batch, patches in ((first, 4), (second, 6)):
-        for tensor in batch["multimodal_train_inputs"].values():
-            assert tensor.device == expected_device
         assert batch["multimodal_train_inputs"]["pixel_values"].shape == (patches, 4)
-    if multimodal_on_host:
-        assert second["multimodal_train_inputs"]["pixel_values"].eq(2.0).all()
+    assert second["multimodal_train_inputs"]["pixel_values"].eq(2.0).all()
     # the rollout's own copies are never moved
     assert all(mm is None or mm["pixel_values"].device.type == "cpu" for mm in rollout["multimodal_train_inputs"])
