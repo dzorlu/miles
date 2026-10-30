@@ -496,6 +496,11 @@ class Qwen35TITOTokenizer(Qwen3TITOTokenizer):
     """Qwen3.5 template and Qwen3 token boundary."""
 
     tool_call_parser = "qwen3_coder"
+    # The fixed template ends the generation prompt with ``<think>\n``, so the
+    # output never carries ``<think>``: the plain ``qwen3`` detector then puts
+    # the thinking, ``</think>`` and the tool-call text into ``content``.
+    # ``qwen3-thinking`` is the same detector with ``force_reasoning=True``.
+    reasoning_parser = "qwen3-thinking"
 
     image_tokens = QWEN3_VL_IMAGE_TOKENS
 
@@ -511,6 +516,11 @@ class Qwen36TITOTokenizer(Qwen3TITOTokenizer):
     """Qwen3.6 template and Qwen3 token boundary."""
 
     tool_call_parser = "qwen3_coder"
+    # The fixed template ends the generation prompt with ``<think>\n``, so the
+    # output never carries ``<think>``: the plain ``qwen3`` detector then puts
+    # the thinking, ``</think>`` and the tool-call text into ``content``.
+    # ``qwen3-thinking`` is the same detector with ``force_reasoning=True``.
+    reasoning_parser = "qwen3-thinking"
 
     image_tokens = QWEN3_VL_IMAGE_TOKENS
 
@@ -526,6 +536,11 @@ class Qwen38SmallTITOTokenizer(Qwen3TITOTokenizer):
     """Qwen3.8 reasoning-effort template with the Qwen3 token boundary."""
 
     tool_call_parser = "qwen3_coder"
+    # The fixed template ends the generation prompt with ``<think>\n``, so the
+    # output never carries ``<think>``: the plain ``qwen3`` detector then puts
+    # the thinking, ``</think>`` and the tool-call text into ``content``.
+    # ``qwen3-thinking`` is the same detector with ``force_reasoning=True``.
+    reasoning_parser = "qwen3-thinking"
 
     image_tokens = QWEN3_VL_IMAGE_TOKENS
 
@@ -540,6 +555,10 @@ class Qwen38SmallTITOTokenizer(Qwen3TITOTokenizer):
 class QwenNextTITOTokenizer(Qwen3TITOTokenizer):
     """Qwen3-Thinking-2507 / Qwen3-Next-Thinking — same boundary behavior as
     Qwen3, distinct (shared) fixed template."""
+
+    # qwen3_thinking_2507_and_next_fixed.jinja ends the generation prompt with
+    # ``<think>\n`` as well (see Qwen35TITOTokenizer).
+    reasoning_parser = "qwen3-thinking"
 
     FIXED_TEMPLATE = FixedTemplate(
         template="qwen3_thinking_2507_and_next_fixed.jinja",
