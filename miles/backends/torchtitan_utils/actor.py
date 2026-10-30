@@ -39,6 +39,8 @@ def _steps_per_rollout(args: TrainerConfig) -> int:
 
 class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
     backend_name = "torchtitan"
+    # each CP rank moves only the screenshots its chunks hold (Glm5NextModel)
+    multimodal_on_host = True
 
     @with_defer(lambda: Timer().start("train_wait"))
     def init(
