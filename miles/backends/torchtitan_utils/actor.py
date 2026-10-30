@@ -137,6 +137,11 @@ class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
         # under FSDP CPU offload the parameters already live on the host and FSDP copies each layer to the GPU
         # for its forward; FSDP refuses to run when they sit on the GPU, so the ref parts are never moved
         self._ref_moves_parts = not ref_config.training.enable_cpu_offload
+        # The reference routers replay the same rollout routes as the actor's
+        # (replay/routing_replay.py ref_log_prob_stage); each router registers
+        # under its global layer index, so fill() records the rollout's stream
+        # for that layer into both models' queues.
+        install_routing_replay(ref_trainer.model_parts)
         for part in ref_trainer.model_parts:
             part.eval()
             part.requires_grad_(False)
