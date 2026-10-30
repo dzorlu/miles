@@ -73,21 +73,18 @@ def get_rollout_data(
         ]
 
     if "multimodal_inputs" in rollout_data:
-        rollout_data["multimodal_train_inputs"] = compute_multimodal_train_inputs(
-            RolloutEngineProcessorArgs.from_sglang_config(args.sglang),
-            rollout_data.pop("multimodal_inputs"),
-            rollout_data["tokens"],
-            device=current_platform.current_device(),
-        )
-    elif "multimodal_train_inputs" in rollout_data:
-        # Move multimodal training tensors to the device in advance
+        # Built on this rank's device, which stands in for the engine's GPU so
+        # the pixels match the engine's processor; then kept on the host like
+        # every other multimodal input: get_batch moves one micro-batch at a
+        # time, or the model moves only what it encodes (multimodal_on_host).
         rollout_data["multimodal_train_inputs"] = [
-            (
-                {key: tensor.to(device=current_platform.current_device()) for key, tensor in mm_dict.items()}
-                if mm_dict is not None
-                else None
+            {key: tensor.cpu() for key, tensor in train_inputs.items()} if train_inputs is not None else None
+            for train_inputs in compute_multimodal_train_inputs(
+                RolloutEngineProcessorArgs.from_sglang_config(args.sglang),
+                rollout_data.pop("multimodal_inputs"),
+                rollout_data["tokens"],
+                device=current_platform.current_device(),
             )
-            for mm_dict in rollout_data["multimodal_train_inputs"]
         ]
 
     if args.qkv_format == "bshd":
@@ -189,6 +186,7 @@ def get_batch(
     qkv_format: str = "thd",
     get_position_ids: bool = False,
     allgather_cp: bool = False,
+    multimodal_on_host: bool = False,
 ) -> dict[str, torch.Tensor | list[torch.Tensor] | None]:
     """
     Generate a CP-ready micro-batch with packed sequence parameters.
@@ -210,6 +208,8 @@ def get_batch(
     - "packed_seq_params": PackedSeqParams with T-H-D settings (cu_seqlens on CUDA, dtype=int)
     - "input_loss_masks": same shape as "tokens"; 1 where the token is a supervised response token.
       Consumers that derive labels (Megatron with labels=None) shift it themselves.
+    - "multimodal_train_inputs": this micro-batch's tensors concatenated per key, on the current CUDA
+      device, or on the host with ``multimodal_on_host`` (for a model that moves only what it encodes).
     Plus any other requested keys forwarded from the iterator.
     """
 
@@ -392,6 +392,10 @@ def get_batch(
                     else:
                         multimodal_data[key] = torch.cat([multimodal_data[key], mm_tensor], dim=0)
                         multimodal_num_items[key].append(mm_tensor.size(0))
+        if not multimodal_on_host:
+            multimodal_data = {
+                key: tensor.to(device=current_platform.current_device()) for key, tensor in multimodal_data.items()
+            }
         batch["multimodal_train_inputs"] = multimodal_data
         batch["multimodal_num_items"] = multimodal_num_items
 
