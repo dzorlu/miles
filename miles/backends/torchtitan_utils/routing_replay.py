@@ -151,7 +151,9 @@ def _replays_of(model_parts: list[nn.Module]) -> list[Replay]:
         module.routing_replay
         for part in model_parts
         for module in part.modules()
-        if isinstance(getattr(module, "routing_replay", None), Replay)
+        if isinstance(
+            getattr(module, "routing_replay", None), Replay
+        )  # config-access-exempt: only MoE router modules carry it
     ]
 
 
