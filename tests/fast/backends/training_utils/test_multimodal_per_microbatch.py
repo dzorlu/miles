@@ -118,4 +118,4 @@ def test_token_space_inputs_are_built_then_kept_on_the_host(monkeypatch, single_
     assert "multimodal_inputs" not in data
     assert _OnDevice.moved_to_host
     assert [m is None for m in data["multimodal_train_inputs"]] == [False, True, False]
-    assert type(data["multimodal_train_inputs"][2]["pixel_values"]) is torch.Tensor
+    assert data["multimodal_train_inputs"][2]["pixel_values"].device.type == "cpu"
