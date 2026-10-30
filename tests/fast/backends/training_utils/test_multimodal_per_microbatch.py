@@ -45,7 +45,9 @@ def test_get_rollout_data_leaves_multimodal_inputs_on_the_host(monkeypatch, sing
     monkeypatch.setattr(data_utils.current_platform, "current_device", lambda: torch.device("cpu"))
 
     data, _ = data_utils.get_rollout_data(
-        Namespace(enable_witness=False, qkv_format="thd"), rollout_data_ref=None, train_parallel_config=None
+        Namespace(enable_witness=False, qkv_format="thd", hf_checkpoint=None),
+        rollout_data_ref=None,
+        train_parallel_config=None,
     )
 
     assert data["multimodal_train_inputs"] is host_inputs
