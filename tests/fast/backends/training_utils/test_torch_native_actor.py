@@ -382,7 +382,7 @@ def test_each_optimizer_step_hands_its_rollout_count_to_the_loss_and_the_metrics
         TorchNativeTrainRayActor, "_fetch_batches", lambda self, progress, it, keys: [{} for _ in progress]
     )
     actor = _Provider()
-    actor.args.calculate_per_token_loss = per_token
+    actor.args.backend = SimpleNamespace(calculate_per_token_loss=per_token)
     runner = _RecordingRunner()
 
     actor._optimizer_steps(runner, _DataIterator(), [2, 3], rollout_id=0, num_rollouts=[5, 6])

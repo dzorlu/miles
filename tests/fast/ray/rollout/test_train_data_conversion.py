@@ -6,8 +6,9 @@ import pytest
 import torch
 from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
-from tests.fast.ray.rollout.conftest import make_args, make_sample, make_samples_grouped
+from tests.fast.ray.rollout.conftest import make_args, make_rollout_config, make_sample, make_samples_grouped
 from tests.fast.train_parallel_config_utils import make_train_parallel_config
+from tests.fast.utils.output_store.test_plan import ALL, INDEXER, MASK, R3, fake_store_refs, response
 
 from miles.ray.rollout import train_data_conversion
 from miles.ray.rollout.train_data_conversion import (
@@ -20,11 +21,19 @@ from miles.ray.rollout.train_data_conversion import (
     split_train_data_by_dp_scheduled_raw,
 )
 from miles.utils.object_store import RayObjectStore
+from miles.utils.output_store.plan import StorePlan, StorePlanError
 from miles.utils.sampling_mask import RolloutSamplingMask
 from miles.utils.types import Sample, WeightVersionSpan, WeightVersionsPerCall
 
 
 # ----------------------------- convert_samples_to_train_data -----------------------------
+
+
+def _store_sample(index: int, *, requested=ALL) -> Sample:
+    """2 prompt and 4 output tokens, whose replay arrays are in the output store."""
+    sample = make_sample(index=index, tokens=list(range(6)), rollout_log_probs=[-0.1] * 4)
+    sample.rollout_store_plan = response(f"k{index}", prompt=2, output=4, requested=requested)
+    return sample
 
 
 class TestConvertSamplesToTrainData:
@@ -33,7 +42,7 @@ class TestConvertSamplesToTrainData:
         converted = {"custom_payload": [1, 2]}
 
         out = convert_samples_to_train_data(
-            make_args(enable_sample_ownership_checker=False),
+            make_rollout_config(enable_sample_ownership_checker=False),
             [make_sample()],
             metadata={},
             custom_convert_samples_to_train_data_func=lambda args, samples: converted,
@@ -183,6 +192,71 @@ class TestConvertSamplesToTrainData:
                 custom_convert_samples_to_train_data_func=None,
                 custom_reward_post_process_func=None,
             )
+
+    def test_store_plans_become_a_column_that_satisfies_the_replay_flags(self):
+        args = make_args(rewards_normalization=False, use_rollout_routing_replay=True, use_rollout_indexer_replay=True)
+        samples = [_store_sample(0), _store_sample(1)]
+
+        out = convert_samples_to_train_data(args, samples, {}, None, None)
+
+        assert out["rollout_store_plan"] == [sample.rollout_store_plan.to_dict() for sample in samples]
+        assert not {"rollout_routed_experts", "rollout_indexer_topk", "rollout_sampling_mask_ids"} & out.keys()
+
+    @pytest.mark.parametrize("missing", [0, 1])
+    def test_store_plans_are_all_or_none(self, missing: int):
+        samples = [make_sample(index=i) if i == missing else _store_sample(i) for i in range(2)]
+        with pytest.raises(StorePlanError, match=rf"missing at position={missing}, sample_index={missing}"):
+            convert_samples_to_train_data(make_args(rewards_normalization=False), samples, {}, None, None)
+        inline = [make_sample(index=0), make_sample(index=1)]
+        assert "rollout_store_plan" not in convert_samples_to_train_data(
+            make_args(rewards_normalization=False), inline, {}, None, None
+        )
+
+    def test_store_plans_must_match_their_samples(self):
+        short = _store_sample(1)
+        short.rollout_store_plan = response("k1", prompt=2, output=3)
+        with pytest.raises(StorePlanError, match="routed_experts has 4 rows; expected 5"):
+            convert_samples_to_train_data(
+                make_args(rewards_normalization=False), [_store_sample(0), short], {}, None, None
+            )
+
+    def test_store_plans_must_share_their_fields(self):
+        samples = [_store_sample(0), _store_sample(1, requested={MASK})]
+        with pytest.raises(StorePlanError, match="must have the same fields"):
+            convert_samples_to_train_data(make_args(rewards_normalization=False), samples, {}, None, None)
+
+    @pytest.mark.parametrize(
+        ("flag", "field"), [("use_rollout_routing_replay", R3), ("use_rollout_indexer_replay", INDEXER)]
+    )
+    def test_a_replay_flag_requires_its_field_in_the_store_plans(self, flag: str, field: str):
+        args = make_args(rewards_normalization=False, **{flag: True})
+        with pytest.raises(StorePlanError, match=rf"--{flag.replace('_', '-')} is set .* no {field}"):
+            convert_samples_to_train_data(args, [_store_sample(0, requested=ALL - {field})], {}, None, None)
+
+    def test_support_mode_store_plans_leave_the_candidates_to_the_trainer(self):
+        args = make_args(
+            rewards_normalization=False,
+            rollout_top_logprobs_num=2,
+            rollout_sampling_logprobs_mode="support",
+            ci_test=True,
+        )
+
+        out = convert_samples_to_train_data(args, [_store_sample(0)], {}, None, None)
+
+        assert out["rollout_log_probs"] == [[-0.1] * 4]
+        assert not {"rollout_topk_token_ids", "rollout_topk_log_probs", "rollout_topk_lengths"} & out.keys()
+        # The trainer does not produce the sampled log-probs, and builds the candidates from the stored mask.
+        without_log_probs = _store_sample(0)
+        without_log_probs.rollout_log_probs = None
+        with pytest.raises(ValueError, match="requires rollout_log_probs"):
+            convert_samples_to_train_data(args, [without_log_probs], {}, None, None)
+        with pytest.raises(StorePlanError, match="stored sampling mask"):
+            convert_samples_to_train_data(args, [_store_sample(0, requested={R3})], {}, None, None)
+
+    def test_selected_mode_store_plans_still_need_the_inline_candidates(self):
+        args = make_args(rewards_normalization=False, rollout_top_logprobs_num=2)
+        with pytest.raises(ValueError, match="requires rollout_topk_token_ids"):
+            convert_samples_to_train_data(args, [_store_sample(0)], {}, None, None)
 
     def test_optional_field_round_number_from_metadata(self):
         args = make_args(rewards_normalization=False)
@@ -631,7 +705,7 @@ class TestPostProcessRewards:
         assert raw == processed == []
 
     def test_custom_reward_post_process_short_circuits(self):
-        args = make_args(advantage_estimator="grpo", rewards_normalization=True)
+        args = make_rollout_config(advantage_estimator="grpo", rewards_normalization=True)
         sentinel = ([0.0], [1.0])
         raw, processed = _post_process_rewards(
             args, [make_sample()], custom_reward_post_process_func=lambda a, s: sentinel
@@ -864,6 +938,21 @@ class TestSplitTrainDataByDp:
         with store.get(ref) as part:
             assert [WeightVersionsPerCall.from_dict(call) for call in part["weight_versions"][0]] == calls
 
+    def test_store_plans_survive_the_object_store(self, ray_local_mode: None, monkeypatch: pytest.MonkeyPatch) -> None:
+        """A converted, split and stored plan reads back as the sample's plan."""
+        fake_store_refs(monkeypatch)
+        samples = [_store_sample(0), _store_sample(1)]
+        data = convert_samples_to_train_data(make_args(rewards_normalization=False), samples, {}, None, None)
+
+        [shard] = split_train_data_by_dp(
+            args=make_args(balance_data=False), data=data, train_parallel_config=make_train_parallel_config(dp_size=1)
+        )
+        store = RayObjectStore(frees_objects=False)
+        stored = store.put(value=shard, value_spec=ROLLOUT_DATA_VALUE_SPEC)
+        with store.get(stored) as part:
+            plans = [StorePlan.from_dict(value) for value in part["rollout_store_plan"]]
+        assert plans == [samples[i].rollout_store_plan for i in shard["partition"]]
+
     def test_partition_indices_form_a_partition(self):
         """All partition indices together cover [0, N) exactly once."""
         args = make_args(balance_data=False)
@@ -1005,13 +1094,19 @@ class TestCanPrecomputeDpSchedule:
         data = _make_split_data(8)
         data["multimodal_train_inputs"] = [None] * 8
         assert can_precompute_dp_schedule(args=args, data=data, train_parallel_config=FULL_SCHEDULE_CONFIG)
-        data["multimodal_train_inputs"] = [{"pixel_values": torch.zeros(4, 3), "image_grid_thw": torch.tensor([[1, 2, 2]])}] * 8
+        data["multimodal_train_inputs"] = [
+            {"pixel_values": torch.zeros(4, 3), "image_grid_thw": torch.tensor([[1, 2, 2]])}
+        ] * 8
         assert can_precompute_dp_schedule(args=args, data=data, train_parallel_config=FULL_SCHEDULE_CONFIG)
-        data["multimodal_train_inputs"] = [{"image_png": torch.zeros(10, dtype=torch.uint8), "image_grid_thw": torch.tensor([[1, 2, 2]])}] * 8
+        data["multimodal_train_inputs"] = [
+            {"image_png": torch.zeros(10, dtype=torch.uint8), "image_grid_thw": torch.tensor([[1, 2, 2]])}
+        ] * 8
         assert can_precompute_dp_schedule(args=args, data=data, train_parallel_config=FULL_SCHEDULE_CONFIG)
         for key in ("grid_thws", "mm_vision_num_patches", "mm_audio_num_tokens"):
             data["multimodal_train_inputs"] = [None] * 7 + [{key: torch.tensor([[1, 2, 2]])}]
-            assert not can_precompute_dp_schedule(args=args, data=data, train_parallel_config=FULL_SCHEDULE_CONFIG), key
+            assert not can_precompute_dp_schedule(
+                args=args, data=data, train_parallel_config=FULL_SCHEDULE_CONFIG
+            ), key
 
     def test_rejects_fewer_rollouts_than_gbs(self):
         args = make_args(balance_data=False, micro_batch_size=1, multi_lora=False)  # global_batch_size=8
@@ -1169,7 +1264,7 @@ class TestRolloutsPerStepOnTheLegacySplit:
 
         from miles.ray.rollout.train_data_conversion import _rollouts_per_step
 
-        args = SimpleNamespace(global_batch_size=4)
+        args = SimpleNamespace(global_batch_size=4, multi_lora=False)
         # 2 rollouts split into 5 samples, one step (dynamic batch of 5 -> 6 at dp 2 would pad; use 5 here).
         assert _rollouts_per_step(args, self._data([7, 7, 7, 9, 9], gbs=5)) == [2]
         # one sample per rollout: the fallback already divides by the right number
@@ -1184,7 +1279,7 @@ class TestRolloutsPerStepOnTheLegacySplit:
 
         from miles.ray.rollout.train_data_conversion import split_train_data_by_dp_raw
 
-        args = SimpleNamespace(global_batch_size=4, balance_data=False)
+        args = SimpleNamespace(global_batch_size=4, balance_data=False, multi_lora=False)
         data = {
             "tokens": [[1]] * 8,
             "rollout_ids": [1, 1, 2, 2, 3, 3, 4, 4],
@@ -1222,7 +1317,7 @@ class TestRolloutsPerStepOnTheLegacySplit:
 
         from miles.ray.rollout.train_data_conversion import split_train_data_by_dp_raw
 
-        args = SimpleNamespace(global_batch_size=2, balance_data=False)
+        args = SimpleNamespace(global_batch_size=2, balance_data=False, multi_lora=False)
         data = {
             "tokens": [[1, 2], [3], [4, 5], [6]],
             "rollout_ids": [7, 7, 9, 9],
@@ -1308,7 +1403,9 @@ class TestVisionRolloutsOnTheScheduledPath:
             iterator = DataIterator(shard, micro_batch_indices=shard["micro_batch_indices"])
             for _ in shard["micro_batch_indices"]:
                 batch = iterator.get_next(["tokens", "multimodal_train_inputs"])
-                assert [mm["tag"].item() for mm in batch["multimodal_train_inputs"]] == [tok[0] for tok in batch["tokens"]]
+                assert [mm["tag"].item() for mm in batch["multimodal_train_inputs"]] == [
+                    tok[0] for tok in batch["tokens"]
+                ]
 
     def test_get_batch_concatenates_images_in_the_micro_batch_order(self, monkeypatch):
         from types import SimpleNamespace
@@ -1331,9 +1428,51 @@ class TestVisionRolloutsOnTheScheduledPath:
             ],
         }
         iterator = data_utils.DataIterator(rollout, micro_batch_indices=[[2, 0], [1]])
-        batch = data_utils.get_batch(iterator, ["tokens", "loss_masks", "total_lengths", "response_lengths", "multimodal_train_inputs"])
+        batch = data_utils.get_batch(
+            iterator, ["tokens", "loss_masks", "total_lengths", "response_lengths", "multimodal_train_inputs"]
+        )
         assert batch["multimodal_train_inputs"]["tag"].flatten().tolist() == [2, 2, 0, 0]
         assert batch["multimodal_num_items"]["tag"] == [2, 2]
         assert [t[0].item() for t in batch["unconcat_tokens"]] == [2, 0]
-        batch = data_utils.get_batch(iterator, ["tokens", "loss_masks", "total_lengths", "response_lengths", "multimodal_train_inputs"])
+        batch = data_utils.get_batch(
+            iterator, ["tokens", "loss_masks", "total_lengths", "response_lengths", "multimodal_train_inputs"]
+        )
         assert batch["multimodal_train_inputs"]["tag"].flatten().tolist() == [1, 1]
+
+
+@pytest.mark.parametrize("scheduled", [False, True])
+def test_dp_splits_carry_the_store_plans_per_row(scheduled: bool):
+    """A key missing from the shard whitelist disappears silently; the trainer needs each row's plan."""
+    data = _make_split_data(8)
+    data["rollout_store_plan"] = [{"fields": {}, "refs": [{"key": f"k{i}"}]} for i in range(8)]
+    args = make_args(balance_data=False, micro_batch_size=2, use_dynamic_batch_size=False)
+
+    if scheduled:
+        shards = split_train_data_by_dp_scheduled_raw(args, data, train_parallel_config=FULL_SCHEDULE_CONFIG)
+    else:
+        shards = split_train_data_by_dp_raw(args, data, dp_size=2)
+
+    assert len(shards) == 2
+    for shard in shards:
+        assert shard["rollout_store_plan"] == [data["rollout_store_plan"][j] for j in shard["partition"]]
+
+
+class TestOutputStoreTookEffect:
+    def _convert(self, samples, **args):
+        return convert_samples_to_train_data(
+            make_args(rewards_normalization=False, **args),
+            samples,
+            metadata={},
+            custom_convert_samples_to_train_data_func=None,
+            custom_reward_post_process_func=None,
+        )
+
+    def test_inline_replay_under_the_switch_means_the_requests_never_opted_in(self):
+        sample = make_sample()
+        sample.rollout_sampling_mask = RolloutSamplingMask(ids=[1], offsets=[0, 1])
+
+        with pytest.raises(StorePlanError, match="builds its own SGLang requests"):
+            self._convert([sample], use_output_store=True)
+
+    def test_without_replay_there_is_nothing_to_store(self):
+        assert "rollout_store_plan" not in self._convert([make_sample()], use_output_store=True)

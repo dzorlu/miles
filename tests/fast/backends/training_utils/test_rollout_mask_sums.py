@@ -135,7 +135,7 @@ class TestSplitRolloutsLoseNothing:
             list(split_lens), list(split_lens), self._masks(split_lens), denominators=rollout_mask_sums
         )
         data = {"tokens": [[0]] * 5, "rollout_ids": rollout_ids, "dynamic_global_batch_size": 5}
-        (num_rollouts,) = _rollouts_per_step(SimpleNamespace(global_batch_size=5), data)
+        (num_rollouts,) = _rollouts_per_step(SimpleNamespace(global_batch_size=5, multi_lora=False), data)
         assert num_rollouts == 2
         assert math.isclose(split(per_token).item() / num_rollouts, expected, rel_tol=1e-6)
         # the fallback divisor (the sample count) scales the same loss by 2/5
@@ -159,7 +159,9 @@ class TestTheTrainerDividesByTheStampedRolloutCount:
         from miles.ray.rollout.train_data_conversion import split_train_data_by_dp_raw
 
         # 2 rollouts in 5 samples, one optimizer step, dp 1: the split stamps [2]
-        split_args = SimpleNamespace(global_batch_size=5, balance_data=False)
+        split_args = SimpleNamespace(
+            global_batch_size=5, balance_data=False, multi_lora=False, backend=SimpleNamespace(global_batch_size=5)
+        )
         data = {
             "tokens": [[1, 2]] * 5,
             "rollout_ids": [7, 7, 7, 9, 9],
