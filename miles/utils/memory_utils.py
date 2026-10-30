@@ -120,7 +120,9 @@ def host_memory(status_text: str | None = None) -> dict:
         key, _, rest = line.partition(":")
         if key in _STATUS_FIELDS:
             out[_STATUS_FIELDS[key]] = round(int(rest.split()[0]) * 1024 / (1024**3), 2)
-    stats = getattr(torch.cuda, "host_memory_stats", None)
+    stats = getattr(
+        torch.cuda, "host_memory_stats", None
+    )  # config-access-exempt: torch API, absent in older torch builds
     if stats is not None and torch.cuda.is_available():
         try:
             host = stats()
@@ -152,7 +154,7 @@ def release_host_memory() -> None:
     heap, so the host footprint between steps stays at the state the trainer
     keeps, not at the largest step so far."""
     gc.collect()
-    if hasattr(torch._C, "_host_emptyCache"):
+    if hasattr(torch._C, "_host_emptyCache"):  # config-access-exempt: private torch API, absent in some builds
         torch._C._host_emptyCache()
     trim_host_heap()
 
