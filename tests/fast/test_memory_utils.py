@@ -49,3 +49,28 @@ def test_a_failing_nvidia_smi_is_a_warning_not_an_error(monkeypatch, caplog):
     with caplog.at_level(logging.WARNING):
         assert memory_utils.gpu_processes(query=query) == []
     assert "nvidia-smi" in caplog.text
+
+
+def test_reset_peak_memory_leaves_an_uninitialized_runtime_alone(monkeypatch):
+    import torch
+
+    from miles.utils import memory_utils
+
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: False)
+    monkeypatch.setattr(
+        torch.accelerator, "reset_peak_memory_stats", lambda *_args: pytest.fail("touched the device runtime")
+    )
+    memory_utils.reset_peak_memory()
+
+
+def test_reset_peak_memory_resets_the_current_device(monkeypatch):
+    import torch
+
+    from miles.utils import memory_utils
+
+    reset: list[int] = []
+    monkeypatch.setattr(torch.cuda, "is_initialized", lambda: True)
+    monkeypatch.setattr(torch.accelerator, "current_device_index", lambda: 3)
+    monkeypatch.setattr(torch.accelerator, "reset_peak_memory_stats", lambda device: reset.append(device))
+    memory_utils.reset_peak_memory()
+    assert reset == [3]
