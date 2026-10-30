@@ -20,7 +20,13 @@ from miles.rollout.generate_utils.generate_endpoint_utils import (
 from miles.rollout.generate_utils.rollout_topk_logprobs import append_rollout_topk_logprobs
 from miles.rollout.generate_utils.sample_utils import merge_samples
 from miles.rollout.generate_utils.sampling_mask import append_sampling_metadata, read_sampled_logprobs
-from miles.rollout.session.media import MediaStore, expand_image_placeholders, media_references, train_inputs
+from miles.rollout.session.media import (
+    MediaStore,
+    expand_image_placeholders,
+    expanded_length,
+    media_references,
+    train_inputs,
+)
 from miles.rollout.session.types import SessionRecord
 from miles.utils.lifecycle import attach_lifecycle_metadata
 from miles.utils.output_store.plan import (
@@ -249,13 +255,16 @@ def _compute_sample_from_openai_record(
     return sample
 
 
-def adopt_session_records(merged: Sample, records: list[SessionRecord]) -> None:
+def adopt_session_records(merged: Sample, records: list[SessionRecord], *, media: MediaStore | None = None) -> None:
     """Complete a merged sample's output store plan from its session's records.
 
     The per-turn plans leave routed experts out: a TITO trim of a turn would cut a row that the
     next turn's incremental object starts after. Like ``merge_samples_with_addition_r3``, they are
     rebuilt from the untrimmed records, each continuing from its ``routed_experts_start_len``. The
     sample also owns every record's object, so objects of turns the merge dropped are deleted with it.
+
+    A record's rows are counted in the engine's token space: ``media`` expands each image
+    placeholder of its prompt to the image's token count, as the engine did when it stored them.
     """
     plan = merged.rollout_store_plan
     if plan is None:
@@ -270,10 +279,11 @@ def adopt_session_records(merged: Sample, records: list[SessionRecord]) -> None:
                 # The merge stopped early: later records lie past the merged tokens.
                 break
             num_output = len(choice["meta_info"]["output_token_logprobs"])
+            prompt_len = expanded_length(record.request["input_ids"], record.request.get("messages") or [], media)
             turn = StorePlan.from_response(
                 ref,
                 request=record.request,
-                num_tokens=len(record.request["input_ids"]) + num_output,
+                num_tokens=prompt_len + num_output,
                 response_length=num_output,
             )
             rows = rows.append(turn.fields[RoutedExpertsSegments.name])
@@ -287,8 +297,15 @@ def merge_samples_with_addition_r3(
     samples: list[Sample],
     records: list[SessionRecord],
     tokenizer,
+    *,
+    media: MediaStore | None = None,
 ) -> Sample:
-    """Merge ordinary fields, then materialize the required append-only R3 prefix."""
+    """Merge ordinary fields, then materialize the required append-only R3 prefix.
+
+    Row offsets are in the engine's token space: a record's rows end at its
+    expanded prompt length plus its outputs, minus one (``media`` expands the
+    image placeholders the way the engine did), which is where the next
+    record's ``routed_experts_start_len`` was computed."""
     merged = merge_samples(samples, tokenizer)
     if all(record.response["choices"][0]["meta_info"].get("routed_experts") is None for record in records):
         return merged
@@ -311,7 +328,8 @@ def merge_samples_with_addition_r3(
         if start != covered_rows:
             raise ValueError(f"additional R3: record {i} starts at row {start}; expected {covered_rows}")
 
-        end = len(record.request["input_ids"]) + len(choice["meta_info"]["output_token_logprobs"]) - 1
+        prompt_len = expanded_length(record.request["input_ids"], record.request.get("messages") or [], media)
+        end = prompt_len + len(choice["meta_info"]["output_token_logprobs"]) - 1
         if end < start:
             raise ValueError(f"additional R3: record {i} has invalid offsets (start={start}, end={end})")
         delta_rows = end - start
