@@ -133,6 +133,15 @@ def host_memory(status_text: str | None = None) -> dict:
     return out
 
 
+def reset_peak_memory() -> None:
+    """Start a new peak window for ``available_memory``'s ``max_*`` fields.
+    Does nothing before the device runtime is initialized: there is no peak
+    to reset, and CPU-only tests run with a stub driver that must not be
+    touched."""
+    if torch.cuda.is_initialized():
+        torch.accelerator.reset_peak_memory_stats(torch.accelerator.current_device_index())
+
+
 def trim_host_heap() -> bool:
     """Return the heap's free pages to the OS (glibc ``malloc_trim``): a
     process that deserialised a large rollout shard keeps the whole peak as

@@ -56,7 +56,7 @@ from miles.utils.distributed_utils import get_gloo_group
 from miles.utils.ft_utils.indep_dp import IndepDPInfo
 from miles.utils.logging_utils import rebind_env_reporting
 from miles.utils.lora.utils import build_lora_config, is_multi_lora_enabled
-from miles.utils.memory_utils import clear_memory, print_memory, release_host_memory
+from miles.utils.memory_utils import clear_memory, print_memory, release_host_memory, reset_peak_memory
 from miles.utils.misc import partition
 from miles.utils.object_store import StoreObjectRef, ValueSpec
 from miles.utils.reloadable_process_group import destroy_process_groups, monkey_patch_torch_dist, reload_process_groups
@@ -540,7 +540,7 @@ class MegatronTrainRayActor(TrainRayActor):
 
         clear_memory()
         # Peaks from here to the next offload are this step's; print_memory("before offload model") reports them.
-        torch.accelerator.reset_peak_memory_stats(torch.accelerator.current_device_index())
+        reset_peak_memory()
         reload_process_groups()
         self._asleep = False
         print_memory("after wake_up model")
