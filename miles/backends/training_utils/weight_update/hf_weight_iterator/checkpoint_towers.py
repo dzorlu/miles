@@ -26,10 +26,9 @@ def mm_tower_names(args) -> tuple[str, ...]:
     with the flag, so its engines can release every weight during training
     like a text run (radixark/miles#3159)."""
     global _warned_implicit_mm_tower_sync
-    names = getattr(args, "mm_tower_sync", None)
-    if names is not None:
+    if (names := args.mm_tower_sync) is not None:
         return tuple(names)
-    if _INKLING_MM_PROVIDER in (getattr(args, "custom_model_provider_path", None) or ""):
+    if (provider := args.custom_model_provider_path) is not None and _INKLING_MM_PROVIDER in provider.path:
         if not _warned_implicit_mm_tower_sync:
             logger.warning(
                 "mm tower sync: enabled implicitly by the %s provider; pass --mm-tower-sync %s",
