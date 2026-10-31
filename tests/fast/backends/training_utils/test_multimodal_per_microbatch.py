@@ -91,7 +91,9 @@ def test_token_space_inputs_are_built_then_kept_on_the_host(monkeypatch, single_
     rollout["multimodal_inputs"] = [{"image": ["a.png"]}, None, {"image": ["b.png", "c.png"]}]
     monkeypatch.setattr(data_utils, "process_rollout_data", lambda *args, **kwargs: (rollout, None))
     monkeypatch.setattr(data_utils.current_platform, "current_device", lambda: torch.device("cpu"))
-    monkeypatch.setattr(data_utils.RolloutEngineProcessorArgs, "from_sglang_config", staticmethod(lambda sglang: sglang))
+    monkeypatch.setattr(
+        data_utils.RolloutEngineProcessorArgs, "from_sglang_config", staticmethod(lambda sglang: sglang)
+    )
     built_with = {}
 
     class _OnDevice(torch.Tensor):
@@ -103,13 +105,16 @@ def test_token_space_inputs_are_built_then_kept_on_the_host(monkeypatch, single_
 
     def build(engine_args, multimodal_inputs, tokens, *, device):
         built_with.update(engine_args=engine_args, refs=multimodal_inputs, device=device)
-        return [None if m is None else {"pixel_values": refs[i].as_subclass(_OnDevice)} for i, m in enumerate(multimodal_inputs)]
+        return [
+            None if m is None else {"pixel_values": refs[i].as_subclass(_OnDevice)}
+            for i, m in enumerate(multimodal_inputs)
+        ]
 
     refs = [_mm(4, 0.0)["pixel_values"], None, _mm(6, 2.0)["pixel_values"]]
     monkeypatch.setattr(data_utils, "compute_multimodal_train_inputs", build)
 
     data, _ = data_utils.get_rollout_data(
-        Namespace(enable_witness=False, qkv_format="thd", hf_checkpoint=None, sglang="sglang-args"),
+        Namespace(enable_witness=False, qkv_format="thd", hf_checkpoint=None, sglang="sglang-args", ci_test=False),
         rollout_data_ref=None,
         train_parallel_config=None,
     )

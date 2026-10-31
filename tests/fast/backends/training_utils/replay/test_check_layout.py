@@ -62,3 +62,15 @@ def test_mismatches_are_reported_against_their_sample_and_image():
 
 def test_samples_with_few_mismatches_are_not_reported():
     assert describe_mismatches(_layout(), [19 - 9]) == []
+
+
+def test_ref_labels_cover_paths_data_urls_and_image_objects():
+    from miles.backends.training_utils.replay.check_layout import _ref_label
+
+    class Image:
+        pass
+
+    assert _ref_label("/m/aaa.png") == "aaa.png"
+    assert _ref_label("data:image/png;base64,AAAA").startswith("data:")
+    assert len(_ref_label("data:image/png;base64,AAAA")) == len("data:") + 12
+    assert _ref_label(Image()) == "Image"
