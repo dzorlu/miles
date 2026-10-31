@@ -322,14 +322,21 @@ class SGLangApiClient:
             {"lora_name": lora_name, "config_dict": config_dict, "pinned": pinned},
         )
 
-    async def release_memory_occupation(self, tags: list[str] = None):
+    async def release_memory_occupation(self, tags: list[str] = None, *, abort_running: bool = True):
         """Release memory occupation. Available tags: weights, kv_cache.
 
-        Aborts whatever is still running first: offload follows the rollout's
-        abort, and a request that survived it (or arrived after it) would hold
-        the KV cache and fail the flush."""
-        await self.abort_all_requests()
-        await self.flush_cache(abort_pending_every=FLUSH_CACHE_REABORT_EVERY)
+        With ``abort_running`` (the default) it aborts whatever is still running
+        first: offload follows the rollout's abort, and a request that survived
+        it (or arrived after it) would hold the KV cache and fail the flush.
+        Without it nothing is aborted: under ``--fully-async --colocate`` the
+        driver has paused generation with ``retract`` so the requests resume
+        after the train phase, and the engine flushes while paused with those
+        requests waiting."""
+        if abort_running:
+            await self.abort_all_requests()
+            await self.flush_cache(abort_pending_every=FLUSH_CACHE_REABORT_EVERY)
+        else:
+            await self.flush_cache()
         return await self._make_request(
             "release_memory_occupation",
             {"tags": tags},

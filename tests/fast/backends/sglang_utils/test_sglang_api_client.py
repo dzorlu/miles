@@ -189,6 +189,18 @@ class _EngineWithASurvivor:
         return _FakeResponse(status_code=400, text=_PENDING)
 
 
+async def test_release_memory_occupation_keeps_paused_requests_without_abort(client, recorder):
+    """Under a driver-owned pause (--fully-async --colocate) the retracted
+    requests must survive the offload: no abort, the paused engine flushes
+    with them waiting, then memory is released."""
+    await client.release_memory_occupation(tags=["kv_cache"], abort_running=False)
+
+    assert [(verb, url) for verb, url, _ in recorder.calls] == [
+        ("get", f"{SERVER_URL}/flush_cache"),
+        ("post", f"{SERVER_URL}/release_memory_occupation"),
+    ]
+
+
 async def test_release_memory_occupation_re_aborts_a_request_that_survived_the_first_abort(client, monkeypatch):
     """miles-legal-cd2t32k (2026-10-18): one engine kept a request decoding
     through the rollout's abort_all; the 60 x 1 s flush poll then timed out
