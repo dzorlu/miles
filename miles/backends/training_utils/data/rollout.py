@@ -72,6 +72,9 @@ def get_rollout_data(
             for t, sid in zip(rollout_data["tokens"], seq_witness_ids, strict=True)
         ]
 
+    if "multimodal_inputs" in rollout_data and args.ci_test:
+        # the media references, kept for the R3 checker's per-sample report (check_layout)
+        rollout_data["multimodal_media_refs"] = list(rollout_data["multimodal_inputs"])
     if "multimodal_inputs" in rollout_data:
         # Built on this rank's device, which stands in for the engine's GPU so
         # the pixels match the engine's processor; then kept on the host like

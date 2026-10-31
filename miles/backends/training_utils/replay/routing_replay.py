@@ -1,6 +1,8 @@
 from contextlib import contextmanager
 
+from miles.backends.training_utils.replay.check_layout import build_layouts
 from miles.backends.training_utils.replay.data import fill_replay_data, register_replay_list_sequential
+from miles.utils.hf_utils.config import load_hf_config
 from miles.utils.replay_base import routing_replay_manager
 
 FALLTHROUGH = "fallthrough"
@@ -37,6 +39,18 @@ def fill(args, models, data_iterators, num_microbatches, rollout_data, align=Non
         indices_are_token_positions=routing_replay_manager.replay_indices_are_token_positions,
         kept_in_train_dump=routing_replay_manager.kept_in_train_dump,
     )
+
+    if routing_replay_manager.enable_check_replay_result and routing_replay_manager.replays:
+        # the checker's mismatches are reported against the sample and image they fall in
+        routing_replay_manager.check_layouts = build_layouts(
+            data_iterator=data_iterators[0],
+            num_microbatches=num_microbatches,
+            entry_lengths=[entry.shape[0] for entry in routing_replay_manager.replays[0].top_indices_list],
+            image_token_id=getattr(
+                load_hf_config(args.hf_checkpoint), "image_token_id", -1
+            ),  # config-access-exempt: text-only configurations omit the image token ID
+            align=align,
+        )
 
     if align is None:
         return
@@ -78,3 +92,4 @@ def rewind() -> None:
 
 def reset() -> None:
     routing_replay_manager.clear_all()
+    routing_replay_manager.check_layouts = []

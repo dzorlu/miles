@@ -69,6 +69,8 @@ class BaseReplayManager:
         self.enabled = False
         self.stage = "fallthrough"
         self.register_replay_list_func = None
+        # per microbatch, set by the routing fill under --ci-test (check_layout.MicrobatchLayout)
+        self.check_layouts: list = []
 
     def create_replay(self, stream_idx: int | None = None) -> Replay:
         replay = Replay(stream_idx=stream_idx)
@@ -206,6 +208,34 @@ class BaseReplayManager:
             return
 
         mismatch_indices = is_mismatch.nonzero(as_tuple=False).squeeze(1)
+        # Contiguous runs of mismatched positions, (start, length): a misaligned
+        # span (one image, one sample) shows as one long run, noise as runs of 1.
+        positions = mismatch_indices.tolist()
+        runs = []
+        for p in positions:
+            if runs and p == runs[-1][0] + runs[-1][1]:
+                runs[-1][1] += 1
+            else:
+                runs.append([p, 1])
+        runs.sort(key=lambda r: -r[1])
+        replay = self.get_current()
+        layer = replay.stream_idx if replay is not None else None
+        logger.warning(
+            f"Replay check runs (rank {_get_rank()}, stage {self.stage}, layer {layer}): {len(runs)} runs over "
+            f"{orig_flat.shape[0]} tokens, longest (start, length): {[tuple(r) for r in runs[:8]]}"
+        )
+        microbatch = None
+        if replay is not None:
+            microbatch = (replay.backward_index if self.stage == "replay_backward" else replay.forward_index) - 1
+        if microbatch is not None and 0 <= microbatch < len(self.check_layouts):
+            # local: miles.utils must not import the backends package at module load
+            from miles.backends.training_utils.replay.check_layout import describe_mismatches
+
+            for line in describe_mismatches(self.check_layouts[microbatch], positions):
+                logger.warning(
+                    f"Replay check sample (rank {_get_rank()}, stage {self.stage}, layer {layer}, "
+                    f"microbatch {microbatch}): {line}"
+                )
         for idx in mismatch_indices[:10]:
             i = idx.item()
             lines = []
