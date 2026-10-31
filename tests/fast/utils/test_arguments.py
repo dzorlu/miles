@@ -824,11 +824,24 @@ def test_the_flag_and_a_matching_path_agree():
     assert args.rollout_function_path == FULLY_ASYNC_ROLLOUT_PATH
 
 
-def test_the_flag_still_rejects_a_different_rollout_function():
-    """Two different selections remain a misconfiguration."""
-    args = _fully_async_candidate_args(fully_async=True, rollout_function_path="pkg.CustomRolloutFn")
+def test_the_flag_keeps_a_named_subclass():
+    """A path given with --fully-async names a FullyAsyncRolloutFn subclass (checked when the
+    rollout executor loads it); train and eval both resolve to it so they share one producer."""
+    args = _fully_async_candidate_args(fully_async=True, rollout_function_path="pkg.CustomFullyAsyncFn")
 
-    with pytest.raises(AssertionError, match="pass only one"):
+    _resolve_rollout_functions(args)
+
+    assert args.fully_async is True
+    assert args.rollout_function_path == "pkg.CustomFullyAsyncFn"
+    assert args.eval_function_path == "pkg.CustomFullyAsyncFn"
+
+
+def test_a_named_subclass_keeps_the_mode_constraints():
+    args = _fully_async_candidate_args(
+        fully_async=True, rollout_function_path="pkg.CustomFullyAsyncFn", colocate=True, pause_generation_mode="in_place"
+    )
+
+    with pytest.raises(AssertionError, match="in_place"):
         _resolve_rollout_functions(args)
 
 

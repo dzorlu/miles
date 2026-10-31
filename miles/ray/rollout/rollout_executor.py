@@ -136,6 +136,7 @@ class RolloutExecutor(DedicatedRpcLoopWorker):
                 fn_args = _compute_rollout_function_config(args, self.args.rollout_function_path)
                 rollout_input = RolloutFnConstructorInput(args=fn_args, data_source=self.data_source)
                 self.generate_rollout = load_rollout_function(rollout_input, self.args.rollout_function_path)
+                _check_fully_async_rollout_fn(self.args, self.generate_rollout)
                 if self.args.eval_function_path == self.args.rollout_function_path:
                     # Reuse the instance so train and eval share one state (and stateful
                     # rollout fns like FullyAsyncRolloutFn are not constructed twice).
@@ -535,6 +536,20 @@ def _compute_rollout_function_config(args: BaseLeafConfig, function: CustomFunct
             *(dataset.custom_generate_function_path for dataset in args.eval_datasets),
         ),
     )
+
+
+def _check_fully_async_rollout_fn(args, rollout_fn: Any) -> None:
+    """--fully-async drives its producer through FullyAsyncRolloutFn's interface, so a
+    --rollout-function-path given with it must name a subclass."""
+    if not args.fully_async:
+        return
+    from miles.rollout.fully_async_rollout import FullyAsyncRolloutFn
+
+    if not isinstance(rollout_fn, FullyAsyncRolloutFn):
+        raise TypeError(
+            f"--fully-async with --rollout-function-path {args.rollout_function_path} needs a "
+            f"subclass of {FullyAsyncRolloutFn.__module__}.FullyAsyncRolloutFn, got {type(rollout_fn).__name__}."
+        )
 
 
 def _single_or_none(xs: Iterable[_T]) -> _T | None:

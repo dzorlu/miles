@@ -74,7 +74,9 @@ def resolve_rollout_function_paths(args: argparse.Namespace) -> None:
         standard_path = "miles.rollout.inference_rollout.inference_rollout_common.InferenceRolloutFn"
     rollout_path = args.rollout_function_path or standard_path
     if args.fully_async:
-        rollout_path = FULLY_ASYNC_ROLLOUT_PATH
+        # A --rollout-function-path under --fully-async names a FullyAsyncRolloutFn
+        # subclass; the rollout executor checks the class when it loads it.
+        rollout_path = args.rollout_function_path or FULLY_ASYNC_ROLLOUT_PATH
     # Resolved after the override: shared-engine eval must reach the producer it pauses.
     eval_path = args.eval_function_path or rollout_path
     args.rollout_function_path = rollout_path
@@ -107,9 +109,6 @@ def _resolve_rollout_functions(args) -> None:
         ), "--fully-async needs the class-based rollout API; unset MILES_USE_LEGACY_ROLLOUT_V1"
         # Runs after validate_multi_lora_args, which selects a rollout function of its own.
         assert not args.multi_lora, "--fully-async and multi-LoRA select different rollout functions"
-        assert (
-            args.rollout_function_path is None
-        ), "--fully-async and --rollout-function-path both select a rollout function; pass only one"
         if args.colocate:
             assert args.train_backend != "fsdp", (
                 "--fully-async --colocate needs the megatron IPC weight updater; the FSDP updater still "
