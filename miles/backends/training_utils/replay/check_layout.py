@@ -59,6 +59,15 @@ def _pixel_digests(train_inputs: dict | None) -> tuple[tuple[int, ...], tuple[st
     return tuple(patches), tuple(hashes)
 
 
+def _ref_label(ref) -> str:
+    # token-space refs are media file paths; the legacy path carries data URLs or image objects
+    if isinstance(ref, str) and not ref.startswith("data:"):
+        return ref.rsplit("/", 1)[-1]
+    if isinstance(ref, str):
+        return "data:" + hashlib.sha256(ref.encode()).hexdigest()[:12]
+    return type(ref).__name__
+
+
 def _sample_layout(offset, tokens, image_token_id, sample_index, rollout_id, refs, train_inputs) -> SampleLayout:
     patches, hashes = _pixel_digests(train_inputs)
     return SampleLayout(
@@ -67,7 +76,7 @@ def _sample_layout(offset, tokens, image_token_id, sample_index, rollout_id, ref
         sample_index=sample_index,
         rollout_id=rollout_id,
         image_spans=_image_spans(tokens.cpu(), image_token_id),
-        image_refs=tuple((refs or {}).get("images") or ()),
+        image_refs=tuple(_ref_label(r) for r in ((refs or {}).get("images") or ())),
         pixel_patches=patches,
         pixel_hashes=hashes,
     )
@@ -131,7 +140,7 @@ def describe_mismatches(layout: MicrobatchLayout, local_rows: list[int]) -> list
         hit = [i for i, (s, e) in enumerate(sample.image_spans) if any(s <= p < e for p in positions)]
         spans = "; ".join(_span_report(i, sample.image_spans[i], positions, sample.length) for i in hit)
         refs = ", ".join(
-            f"img{i}={sample.image_refs[i].rsplit('/', 1)[-1] if i < len(sample.image_refs) else '?'}"
+            f"img{i}={sample.image_refs[i] if i < len(sample.image_refs) else '?'}"
             f"/px{sample.pixel_hashes[i] if i < len(sample.pixel_hashes) else '?'}"
             f"/patches{sample.pixel_patches[i] if i < len(sample.pixel_patches) else '?'}"
             for i in hit
