@@ -39,6 +39,8 @@ def _steps_per_rollout(args: TrainerConfig) -> int:
 
 class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
     backend_name = "torchtitan"
+    # each CP rank moves only the screenshots its chunks hold (Glm5NextModel)
+    multimodal_on_host = True
 
     @with_defer(lambda: Timer().start("train_wait"))
     def init(
@@ -141,10 +143,14 @@ class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
         # under its global layer index, so fill() records the rollout's stream
         # for that layer into both models' queues.
         install_routing_replay(ref_trainer.model_parts)
+        # under FSDP CPU offload the parameters already live on the host and FSDP copies each layer to the GPU
+        # for its forward; FSDP refuses to run when they sit on the GPU, so the ref parts are never moved
+        self._ref_moves_parts = not ref_config.training.enable_cpu_offload
         for part in ref_trainer.model_parts:
             part.eval()
             part.requires_grad_(False)
-            part.cpu()
+            if self._ref_moves_parts:
+                part.cpu()
         torch.accelerator.empty_cache()
         self._ref_parts = ref_trainer.model_parts
         logger.info(f"Built a torchtitan reference trainer from {args.ref_load}; it lives on the host between passes")
@@ -152,13 +158,15 @@ class TorchtitanTrainRayActor(TorchNativeTrainRayActor):
 
     @contextmanager
     def _ref_context(self):
-        for part in self._ref_parts:
-            part.to(current_platform.current_device())
+        if self._ref_moves_parts:
+            for part in self._ref_parts:
+                part.to(current_platform.current_device())
         try:
             yield
         finally:
-            for part in self._ref_parts:
-                part.cpu()
+            if self._ref_moves_parts:
+                for part in self._ref_parts:
+                    part.cpu()
             torch.accelerator.empty_cache()
 
     def _save_checkpoint(self, rollout_id: int) -> None:
