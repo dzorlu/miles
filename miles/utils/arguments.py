@@ -390,6 +390,7 @@ def parse_args_and_get_parser(
     sglang, sglang_scaling = SglangConfig.parse_args(args)
     raw_megatron = resolve_megatron_config(args, base_args=backend_values if backend == "megatron" else {})
     check_output_store_args(args, sglang=sglang, megatron=raw_megatron)
+    _check_multimodal_token_space_processing_args(args, sglang=sglang)
     values = {name: value for name, value in vars(args).items() if name in AllConfig.model_fields} | {
         "raw_megatron": raw_megatron,
         "raw_fsdp": FsdpArgsNamespace(**backend_values) if backend == "fsdp" else None,
@@ -863,6 +864,28 @@ def _apply_custom_config(args, data: dict) -> None:
                 f"Warning: Argument {k} is already set to {getattr(args, k)}, will override with {v}."
             )  # config-access-exempt: attribute selected at runtime from k
         setattr(args, k, v)
+
+
+def _check_multimodal_token_space_processing_args(args, *, sglang: SglangConfig) -> None:
+    """Reject launch settings under which the trainer cannot rebuild the rollout engines' media features."""
+    if not args.multimodal_token_space_processing:
+        return
+    if not sglang.common_value("enable_token_space_processor"):
+        raise ValueError(
+            "--multimodal-token-space-processing needs the SGLang engines to expand media placeholders in token "
+            "space; set --sglang-enable-token-space-processor."
+        )
+    if args.rollout_external_engine_addrs:
+        raise ValueError(
+            "--multimodal-token-space-processing builds the trainer's processor from the server args Miles "
+            "launches its engines with, which external engines do not share."
+        )
+    for name in ("rl_on_policy_target", "true_on_policy_contract", "decrypted_config_file"):
+        if sglang.common_value(name) is not None:
+            raise ValueError(
+                f"--multimodal-token-space-processing does not support --sglang-{name.replace('_', '-')}: the "
+                "trainer cannot yet build its processor the way the engines then do."
+            )
 
 
 def miles_validate_args(args):

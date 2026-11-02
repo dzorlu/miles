@@ -57,7 +57,11 @@ async def eval_rollout_single_dataset(
         tokenizer = load_tokenizer(
             args.hf_checkpoint, chat_template_path=args.chat_template_path, trust_remote_code=True
         )
-        processor = load_processor(args.hf_checkpoint, trust_remote_code=True)
+        processor = (
+            None
+            if args.multimodal_token_space_processing
+            else load_processor(args.hf_checkpoint, trust_remote_code=True)
+        )
         prompt_dataset_cache[cache_key] = Dataset(
             path=dataset_cfg.path,
             tokenizer=tokenizer,
@@ -66,6 +70,7 @@ async def eval_rollout_single_dataset(
             prompt_key=dataset_cfg.input_key,
             label_key=dataset_cfg.label_key,
             multimodal_keys=args.multimodal_keys,
+            media_dir=args.shared_media_dir,
             metadata_key=dataset_cfg.metadata_key,
             tool_key=dataset_cfg.tool_key,
             apply_chat_template=args.apply_chat_template,

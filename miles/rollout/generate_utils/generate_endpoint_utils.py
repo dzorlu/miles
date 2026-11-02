@@ -19,6 +19,7 @@ from miles.rollout.generate_utils.sampling_mask import (
 )
 from miles.router.backend import make_router_backend
 from miles.utils.lora.utils import LORA_ADAPTER_NAME, lora_rollout_enabled
+from miles.utils.media_refs import has_media, load_media_for_processor, rollout_media_payload
 from miles.utils.output_store.plan import (
     FIELDS,
     OUTPUT_STORE_REF_KEY,
@@ -27,7 +28,7 @@ from miles.utils.output_store.plan import (
     StorePlanError,
     store_ref_from_dict,
 )
-from miles.utils.processing_utils import encode_image_for_rollout_engine, extract_multimodal_train_inputs
+from miles.utils.processing_utils import extract_multimodal_train_inputs
 from miles.utils.types import Sample
 
 
@@ -35,8 +36,9 @@ from miles.utils.types import Sample
 def compute_prompt_ids_from_sample(state, sample, tools=None):
     prompt = sample.prompt
 
-    if state.processor and sample.multimodal_inputs and any(v is not None for v in sample.multimodal_inputs.values()):
-        processor_output = state.processor(text=prompt, **sample.multimodal_inputs)
+    # In token space SGLang expands the media placeholders and the trainer builds the processor tensors.
+    if state.processor and has_media(sample.multimodal_inputs) and not state.args.multimodal_token_space_processing:
+        processor_output = state.processor(text=prompt, **load_media_for_processor(sample.multimodal_inputs))
         prompt_ids = processor_output["input_ids"][0]
 
         # TODO shall we move it to other places? then can make this function immutable
@@ -60,6 +62,35 @@ def compute_routing_headers(args, sample: Sample) -> dict[str, str]:
     return make_router_backend(args).routing_headers(sample.routing_key, args.sglang.models)
 
 
+def token_space_request_fields(mm_token_expansion_start_len: int) -> dict[str, Any]:
+    """Ask SGLang to expand media placeholders after the already expanded prefix and return the prompt IDs."""
+    # The request carries every media reference; SGLang matches the placeholders after the prefix
+    # to the trailing references, so a resumed request with a fully expanded prefix expands nothing.
+    return {"mm_token_expansion_start_len": mm_token_expansion_start_len, "return_prompt_token_ids": True}
+
+
+def adopt_expanded_prompt_ids(sample: Sample, payload: dict, output: dict) -> None:
+    """Replace the request's prompt IDs with the ones SGLang expanded in token space.
+
+    Args:
+        sample: The sample the request was built from; its tokens, and on a later turn its response fields, grow.
+        payload: The request sent to SGLang; nothing happens unless it asked for ``return_prompt_token_ids``.
+        output: SGLang's response, carrying the expanded ``prompt_token_ids``.
+    """
+    if not payload.get("return_prompt_token_ids"):
+        return
+    prompt_token_ids = output["prompt_token_ids"]
+    num_added_prompt_tokens = len(prompt_token_ids) - len(sample.tokens)
+    if sample.response_length:
+        # Expansion after the first response belongs to the zero-loss input suffix of a later turn.
+        sample.response_length += num_added_prompt_tokens
+        if sample.loss_mask is not None:
+            sample.loss_mask += [0] * num_added_prompt_tokens
+        if sample.rollout_log_probs is not None:
+            sample.rollout_log_probs += [0.0] * num_added_prompt_tokens
+    sample.tokens = list(prompt_token_ids)
+
+
 def compute_request_payload(
     args,
     input_ids: list[int],
@@ -68,6 +99,7 @@ def compute_request_payload(
     *,
     evaluation: bool = False,
     kv_cache_namespace: str | None = None,
+    mm_token_expansion_start_len: int = 0,
 ) -> tuple[dict[str, Any] | None, Sample.Status | None]:
     sampling_params = deepcopy(sampling_params)
     max_new_tokens = sampling_params.pop("max_new_tokens", args.rollout_max_response_len)
@@ -89,8 +121,9 @@ def compute_request_payload(
         payload["return_sampling_mask"] = True
     if lora_rollout_enabled(args):
         payload["lora_path"] = LORA_ADAPTER_NAME
-    if image_data := (multimodal_inputs or {}).get("images"):
-        payload["image_data"] = [encode_image_for_rollout_engine(image) for image in image_data]
+    payload.update(rollout_media_payload(multimodal_inputs))
+    if has_media(multimodal_inputs) and args.multimodal_token_space_processing:
+        payload.update(token_space_request_fields(mm_token_expansion_start_len))
     if kv_cache_namespace is not None:
         payload["extra_key"] = kv_cache_namespace
 
@@ -112,6 +145,7 @@ async def update_sample_from_response(
     # Initialize sample.tokens for the first turn
     if (len(sample.response) == 0) and not sample.tokens:
         sample.tokens = payload["input_ids"]
+    adopt_expanded_prompt_ids(sample, payload, output)
 
     if x := output["meta_info"].get("output_token_logprobs"):
         new_response_tokens = [item[1] for item in x]
