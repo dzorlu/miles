@@ -119,19 +119,27 @@ def _write_checkpoint_config(tmp_path, **text_overrides) -> str:
     return str(tmp_path)
 
 
-def _spec(tmp_path, **text_overrides):
-    from miles.backends.torchtitan_utils.config import resolve_model_spec
+def _model_config(tmp_path, **text_overrides):
+    from torchtitan.config.parallelism import ParallelismConfig
+
+    from miles.backends.torchtitan_utils.config import build_model_config
 
     checkpoint = _write_checkpoint_config(tmp_path, **text_overrides)
-    return resolve_model_spec(
-        Namespace(backend=Namespace(titan_model_name="glm5_next", titan_model_flavor="4layer")),
+    return build_model_config(
+        Namespace(backend=Namespace(titan_model_name="glm5_next", titan_model_flavor="4layer", seq_length=4096)),
+        parallelism=ParallelismConfig(),
         hf_assets_path=checkpoint,
     )
 
 
 def test_the_model_is_sized_from_the_checkpoint_config(tmp_path):
+    from torchtitan.models.common import Sigmoid
+    from torchtitan.models.common.moe import MoE
+
+    from miles.backends.torchtitan_utils.models.glm5_next.layers import ClampedSwiGLU
+
     hf = _HF_TEXT_CONFIG
-    model = _spec(tmp_path).model
+    model = _model_config(tmp_path)
     assert (model.dim, model.vocab_size, len(model.layers), model.num_streams) == (
         hf["hidden_size"],
         hf["vocab_size"],
@@ -161,30 +169,32 @@ def test_the_model_is_sized_from_the_checkpoint_config(tmp_path):
         linear["gate_lower_bound"],
     )
     assert model.layers[0].hc_attn.sinkhorn_iterations == hf["hc_sinkhorn_iters"]
-    assert model.layers[0].feed_forward.w1.out_features == hf["intermediate_size"]
-    moe = model.layers[1].moe
-    assert (moe.num_experts, moe.routed_experts.inner_experts.hidden_dim) == (
+    assert model.layers[0].feed_forward.w13.out_features == hf["intermediate_size"]
+    assert model.layers[0].feed_forward.activation_fn == ClampedSwiGLU.Config(swiglu_limit=hf["swiglu_limit"])
+    moe = model.layers[1].feed_forward
+    assert (moe.num_experts, moe.routed_experts.w2.in_features) == (
         hf["n_routed_experts"],
         hf["moe_intermediate_size"],
     )
-    assert (moe.router.top_k, moe.router.score_func, moe.router.route_scale, moe.router.route_norm) == (
+    assert (moe.router.top_k, type(moe.router.score_func), moe.router.route_scale, moe.router.route_norm) == (
         hf["num_experts_per_tok"],
-        "sigmoid",
+        Sigmoid.Config,
         hf["routed_scaling_factor"],
         hf["norm_topk_prob"],
     )
-    assert moe.routed_experts.inner_experts.swiglu_limit == hf["swiglu_limit"]
-    assert [(layer.kda is not None, layer.moe is not None) for layer in model.layers] == [
+    assert moe.routed_experts.activation_fn == ClampedSwiGLU.Config(swiglu_limit=hf["swiglu_limit"])
+    assert (moe.router.aux_loss, moe.freeze_expert_bias) == (None, True)
+    assert [(layer.kda is not None, isinstance(layer.feed_forward, MoE.Config)) for layer in model.layers] == [
         (attn == "linear_attention", mlp == "sparse")
         for attn, mlp in zip(hf["layer_types"], hf["mlp_layer_types"], strict=True)
     ]
 
 
 def test_every_trained_tensor_maps_onto_exactly_the_checkpoint_text_keys(tmp_path):
-    spec = _spec(tmp_path)
+    model_config = _model_config(tmp_path)
     with torch.device("meta"):
-        model = spec.model.build()
-    adapter = spec.state_dict_adapter(spec.model, str(tmp_path))
+        model = model_config.build()
+    adapter = model_config._owner.state_dict_adapter_cls(model_config, str(tmp_path))
     state = {k: v for k, v in model.state_dict().items() if "tokens_per_expert" not in k}
     hf_keys = {re.sub(r"\.experts\.\d+\.", ".experts.E.", k) for k in adapter.to_hf(state)}
     assert hf_keys == _checkpoint_keys()
@@ -192,18 +202,18 @@ def test_every_trained_tensor_maps_onto_exactly_the_checkpoint_text_keys(tmp_pat
 
 def test_a_checkpoint_variant_the_package_does_not_implement_is_refused(tmp_path):
     with pytest.raises(ValueError, match="sigmoid"):
-        _spec(tmp_path, scoring_func="softmax")
+        _model_config(tmp_path, scoring_func="softmax")
 
 
 def test_a_checkpoint_without_linear_attention_layers_builds_without_their_config(tmp_path):
-    spec = _spec(
+    model_config = _model_config(
         tmp_path,
         num_hidden_layers=2,
         layer_types=["deepseek_sparse_attention", "deepseek_sparse_attention"],
         mlp_layer_types=["dense", "sparse"],
         linear_attn_config=None,
     )
-    assert [layer.kda for layer in spec.model.layers] == [None, None]
+    assert [layer.kda for layer in model_config.layers] == [None, None]
 
 
 def test_the_forward_takes_images_as_optional_keywords():
@@ -214,3 +224,25 @@ def test_the_forward_takes_images_as_optional_keywords():
     parameters = inspect.signature(Glm5NextModel.forward).parameters
     for name in ("pixel_values", "image_grid_thw", "image_png", "image_png_lengths"):
         assert parameters[name].default is None
+
+
+def test_preprocessing_hands_images_to_the_forward_unsharded(monkeypatch):
+    from torchtitan.models.common.decoder import Decoder
+
+    from miles.backends.torchtitan_utils.models.glm5_next.model import Glm5NextModel
+
+    seen = {}
+
+    def _decoder_preprocess(self, input_dict, **kwargs):
+        seen.update(input_dict)
+        return input_dict.pop("input"), input_dict.pop("labels"), input_dict, {}
+
+    monkeypatch.setattr(Decoder, "preprocess_inputs", _decoder_preprocess)
+    images = {"pixel_values": torch.zeros(4, 3), "image_grid_thw": torch.tensor([[1, 2, 2]])}
+    tokens = torch.arange(8)
+    inputs, _, model_kwargs, _ = Glm5NextModel.preprocess_inputs(
+        object.__new__(Glm5NextModel), {"input": tokens, "labels": tokens, **images}
+    )
+    assert inputs is tokens
+    assert not set(images) & set(seen)
+    assert all(model_kwargs[key] is value for key, value in images.items())

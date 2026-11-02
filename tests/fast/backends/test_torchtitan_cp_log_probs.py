@@ -70,8 +70,6 @@ def _worker(rank: int, world_size: int, port: int) -> None:
 
 
 def _check_against_the_full_logits(mesh, args, dtype: torch.dtype, world_size: int) -> None:
-    from torchtitan.distributed.context_parallel import cp_shard
-
     from miles.backends.torchtitan_utils.loss import RLLossAdapter
 
     g = torch.Generator().manual_seed(0)
@@ -83,13 +81,13 @@ def _check_against_the_full_logits(mesh, args, dtype: torch.dtype, world_size: i
     reference_loss, reference = _loss(reference_logits, batch, args)
     reference_loss.backward()
 
-    (local_positions,), _ = cp_shard(mesh, (torch.arange(_SEQ_LEN).unsqueeze(0),), None, "headtail")
-    local_positions = local_positions.flatten()
-    local_logits = full[:, local_positions].clone().requires_grad_(True)
+    # torchtitan shards CP inputs contiguously (no load balancer); the model returns [T_local, V]
+    local_positions = torch.arange(_SEQ_LEN).chunk(world_size)[dist.get_rank()]
+    local_logits = full[0, local_positions].clone().requires_grad_(True)
     adapter = RLLossAdapter(RLLossAdapter.Config())
-    adapter.set_context_parallel(mesh, "headtail")
+    adapter.set_context_parallel(mesh)
     adapter.arm([batch], lambda pred, b: _loss(pred, b, args), is_training=True)
-    loss, _ = adapter(local_logits, torch.zeros(1, local_positions.numel(), dtype=torch.long))
+    loss, _ = adapter(local_logits, torch.zeros(local_positions.numel(), dtype=torch.long))
     loss.backward()
     (result,) = adapter.collect()
 
@@ -98,7 +96,7 @@ def _check_against_the_full_logits(mesh, args, dtype: torch.dtype, world_size: i
     torch.testing.assert_close(result["entropy"], reference["entropy"], rtol=0, atol=0)
     # every rank backprops the same full-sequence loss and the gather's backward sums the ranks,
     # the factor the trainer's 1 / cp gradient scale removes; the full-logit gather did the same
-    expected_grad = world_size * reference_logits.grad[:, local_positions]
+    expected_grad = world_size * reference_logits.grad[0, local_positions]
     torch.testing.assert_close(local_logits.grad, expected_grad, rtol=0, atol=0)
 
 

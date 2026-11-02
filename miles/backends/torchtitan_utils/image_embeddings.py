@@ -4,8 +4,8 @@ A microbatch reaches every CP rank with the images of the whole sequence: either
 (``[patches, features]``, the images back to back) or the PNG bytes of each image (``image_png``, a
 uint8 tensor of the PNGs back to back, and ``image_png_lengths``), plus ``image_grid_thw``
 (``[images, 3]``). Image ``i`` fills ``t * h * w / merge**2`` image-token rows, in sequence order.
-A rank holds load-balanced chunks of the sequence, so it finds the global feature row of each of its
-image tokens from the global image-token mask and encodes only the images those rows fall in.
+A rank holds a contiguous ``1 / cp`` slice of the sequence, so it finds the global feature row of each
+of its image tokens from the global image-token mask and encodes only the images those rows fall in.
 
 No torchtitan imports, so the CPU tests run without it.
 """
@@ -104,7 +104,7 @@ def image_features_for_local_tokens(
 
 
 def write_image_features(
-    h_BLD: torch.Tensor,
+    h_TD: torch.Tensor,
     tokens: torch.Tensor,
     *,
     image_token_id: int,
@@ -112,11 +112,10 @@ def write_image_features(
     encode: Callable[[list[int]], torch.Tensor],
     cp_group: dist.ProcessGroup | None = None,
     local_indices: torch.Tensor | None = None,
-    restore_indices: torch.Tensor | None = None,
 ) -> torch.Tensor:
-    """The embedding output ``[1, L, D]`` with this rank's image-token rows replaced by vision features.
-    Under CP, ``local_indices`` are the sequence positions of this rank's tokens and ``restore_indices``
-    put the rank-concatenated shards back in sequence order."""
+    """The embedding output ``[T, D]`` with this rank's image-token rows replaced by vision features.
+    Under CP, ``local_indices`` are the sequence positions of this rank's tokens; the ranks hold
+    contiguous slices in rank order, so the gathered image-token mask is already in sequence order."""
     with torch.no_grad():
         is_image = tokens.flatten() == image_token_id
         global_is_image = is_image
@@ -124,13 +123,13 @@ def write_image_features(
             local = is_image.to(torch.uint8)
             gathered = local.new_empty(dist.get_world_size(cp_group) * local.shape[0])
             dist.all_gather_into_tensor(gathered, local, group=cp_group)
-            global_is_image = gathered.index_select(0, restore_indices).bool()
+            global_is_image = gathered.bool()
         positions, features = image_features_for_local_tokens(
             global_is_image, local_indices, tokens_per_image=tokens_per_image, encode=encode
         )
     if features is None:
-        return h_BLD
-    return h_BLD.index_put((torch.zeros_like(positions), positions), features.to(h_BLD.dtype))
+        return h_TD
+    return h_TD.index_put((positions,), features.to(h_TD.dtype))
 
 
 def split_pngs(image_png: torch.Tensor, image_png_lengths: torch.Tensor) -> list[bytes]:

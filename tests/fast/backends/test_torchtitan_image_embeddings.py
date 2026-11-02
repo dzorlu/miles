@@ -19,8 +19,8 @@ _MERGE = 2
 _SEQ_LEN = 64
 # grids (t, h, w) fill 4, 6, 2 and 8 image-token rows after the 2x2 merge
 _GRIDS = torch.tensor([[1, 4, 4], [1, 4, 6], [1, 2, 4], [2, 4, 4]])
-# image token spans in the sequence; with CP 4 the 8 headtail chunks are 8 tokens wide, so spans
-# 6..9, 14..19 and 40..47 cross chunk boundaries
+# image token spans in the sequence; with CP 8 each rank's slice is 8 tokens wide, so spans
+# 6..9 and 14..19 cross slice boundaries
 _SPANS = [(6, 10), (14, 20), (30, 32), (40, 48)]
 
 
@@ -31,10 +31,9 @@ def _sequence() -> torch.Tensor:
     return tokens
 
 
-def _headtail_indices(seq_len: int, cp: int, rank: int) -> torch.Tensor:
-    """torchtitan's headtail split: 2 * cp chunks, rank r holds chunk r and chunk 2 * cp - 1 - r."""
-    chunks = torch.arange(seq_len).chunk(2 * cp)
-    return torch.cat([chunks[rank], chunks[2 * cp - 1 - rank]])
+def _contiguous_indices(seq_len: int, cp: int, rank: int) -> torch.Tensor:
+    """torchtitan's CP sharding without a load balancer: rank r holds the r-th contiguous 1 / cp slice."""
+    return torch.arange(seq_len).chunk(cp)[rank]
 
 
 def _row_features(tokens_per_image: torch.Tensor, calls: list):
@@ -54,7 +53,7 @@ def _images_overlapping(indices: torch.Tensor, tokens: torch.Tensor) -> list[int
     return [i for i, (start, end) in enumerate(_SPANS) if held & set(range(start, end))]
 
 
-@pytest.mark.parametrize("cp", [1, 2, 4])
+@pytest.mark.parametrize("cp", [1, 2, 4, 8])
 def test_each_rank_gets_the_global_feature_row_of_each_of_its_image_tokens(cp):
     tokens = _sequence()
     is_image = tokens == _IMAGE_ID
@@ -63,7 +62,7 @@ def test_each_rank_gets_the_global_feature_row_of_each_of_its_image_tokens(cp):
     assert tokens_per_image.tolist() == [4, 6, 2, 8]
 
     for rank in range(cp):
-        local_indices = _headtail_indices(_SEQ_LEN, cp, rank)
+        local_indices = _contiguous_indices(_SEQ_LEN, cp, rank)
         calls = []
         positions, features = image_features_for_local_tokens(
             is_image,
@@ -73,9 +72,14 @@ def test_each_rank_gets_the_global_feature_row_of_each_of_its_image_tokens(cp):
         )
         sequence_positions = local_indices[positions]
         assert torch.equal(sequence_positions, local_indices[is_image[local_indices]])
-        assert torch.equal(features[:, 0].long(), global_rows[sequence_positions])
-        # only the screenshots whose token span overlaps this rank's chunks are encoded, once each
-        assert calls == [_images_overlapping(local_indices, tokens)]
+        overlapping = _images_overlapping(local_indices, tokens)
+        # only the screenshots whose token span overlaps this rank's slice are encoded, once each;
+        # a slice without image tokens runs no tower
+        assert calls == ([overlapping] if overlapping else [])
+        if overlapping:
+            assert torch.equal(features[:, 0].long(), global_rows[sequence_positions])
+        else:
+            assert features is None
 
 
 def test_without_cp_every_image_token_is_written_in_order():
@@ -97,7 +101,7 @@ def test_a_rank_without_image_tokens_runs_no_tower():
     tokens_per_image = image_token_counts(_GRIDS[:1], _MERGE)
     positions, features = image_features_for_local_tokens(
         tokens == _IMAGE_ID,
-        _headtail_indices(_SEQ_LEN, 4, 3),
+        _contiguous_indices(_SEQ_LEN, 4, 0),
         tokens_per_image=tokens_per_image,
         encode=_row_features(tokens_per_image, calls),
     )
@@ -183,29 +187,28 @@ def _gloo_cp_worker(rank: int, world_size: int, port: int) -> None:
     init_gloo(rank, world_size, port=port)
     try:
         tokens = _sequence()
-        local_indices = _headtail_indices(_SEQ_LEN, world_size, rank)
-        restore_indices = torch.cat([_headtail_indices(_SEQ_LEN, world_size, r) for r in range(world_size)]).argsort()
+        local_indices = _contiguous_indices(_SEQ_LEN, world_size, rank)
         tokens_per_image = image_token_counts(_GRIDS, _MERGE)
-        h_BLD = torch.full((1, local_indices.numel(), 2), -1.0, requires_grad=True)
+        h_TD = torch.full((local_indices.numel(), 2), -1.0, requires_grad=True)
         calls = []
         out = write_image_features(
-            h_BLD,
-            tokens[local_indices].unsqueeze(0),
+            h_TD,
+            tokens[local_indices],
             image_token_id=_IMAGE_ID,
             tokens_per_image=tokens_per_image,
             encode=_row_features(tokens_per_image, calls),
             cp_group=dist.group.WORLD,
             local_indices=local_indices,
-            restore_indices=restore_indices,
         )
         is_image = (tokens == _IMAGE_ID)[local_indices]
         global_rows = ((tokens == _IMAGE_ID).cumsum(0) - 1)[local_indices]
-        assert torch.equal(out[0, is_image, 0].long(), global_rows[is_image])
-        assert out[0, ~is_image].eq(-1).all()
-        assert calls == [_images_overlapping(local_indices, tokens)]
+        assert torch.equal(out[is_image, 0].long(), global_rows[is_image])
+        assert out[~is_image].eq(-1).all()
+        overlapping = _images_overlapping(local_indices, tokens)
+        assert calls == ([overlapping] if overlapping else [])
         # image rows take no gradient into the embedding; text rows keep theirs
         out.sum().backward()
-        assert torch.equal(h_BLD.grad[0, :, 0], (~is_image).float())
+        assert torch.equal(h_TD.grad[:, 0], (~is_image).float())
     finally:
         dist.destroy_process_group()
 

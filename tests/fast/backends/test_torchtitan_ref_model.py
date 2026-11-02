@@ -33,11 +33,12 @@ def _build_ref(cpu_offload: bool, moves: list[str]):
     trainer = SimpleNamespace(
         model_parts=[part],
         configure_loss_reduction=lambda: None,
-        checkpointer=SimpleNamespace(load=lambda: None),
+        engine=SimpleNamespace(load_checkpoint=lambda: None),
         step_runner=lambda: "ref-runner",
     )
     config = SimpleNamespace(training=SimpleNamespace(enable_cpu_offload=cpu_offload))
     actor = object.__new__(actor_mod.TorchtitanTrainRayActor)
+    actor.trainer = SimpleNamespace(parallelism=None)
     with (
         patch.object(actor_mod, "build_trainer_config", return_value=config),
         patch.object(actor_mod, "TitanTrainer", return_value=trainer),
