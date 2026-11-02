@@ -3,6 +3,7 @@ from dataclasses import dataclass
 from typing import Any
 
 import torch
+import torch_remat as remat
 from torch import nn
 from torch.distributed.fsdp import CPUOffloadPolicy, MixedPrecisionPolicy, OffloadPolicy, fully_shard
 from torchtitan.config import TrainingConfig
@@ -63,10 +64,15 @@ class Glm5NextBlock(Module):
     def forward(self, x_TND: torch.Tensor, sequence: PackedSequence) -> torch.Tensor:
         aggregated, h_post, h_res = self.hc_attn(x_TND)
         out = self.attn(self.attention_norm(aggregated), sequence)
+        # update_residual_streams reads the attention output with bare ops.
+        remat.recompute_needs_tensor(out)
         x_TND = update_residual_streams(out, x_TND, h_post, h_res)
 
         aggregated, h_post, h_res = self.hc_ffn(x_TND)
         out = self.feed_forward(self.ffn_norm(aggregated))
+        # The MoE's shared_add region is saved, not recomputed; the bare ops in
+        # update_residual_streams need its real output during recompute.
+        remat.recompute_needs_tensor(out)
         return update_residual_streams(out, x_TND, h_post, h_res)
 
 
